@@ -122,6 +122,9 @@ func (p *OpenAIProvider) buildParams(c *types.Context) openai.ChatCompletionNewP
 	params := openai.ChatCompletionNewParams{
 		Model:    openai.ChatModel(p.model),
 		Messages: convertMessagesOpenAI(c.Messages),
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openai.Bool(true),
+		},
 	}
 	if len(c.Tools) > 0 {
 		params.Tools = convertToolsOpenAI(c.Tools)

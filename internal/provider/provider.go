@@ -18,7 +18,9 @@ func Build(name string, entry types.ProviderRegistryEntry, model string) (types.
 	var p types.Provider
 
 	switch entry.ProviderType {
-	case types.ProviderOpenAI, types.ProviderOpenAIResponses:
+	case types.ProviderOpenAIResponses:
+		return nil, fmt.Errorf("provider %s: openai_responses API not yet implemented (use openai for chat completions)", name)
+	case types.ProviderOpenAI:
 		p, err = NewOpenAI(name, apiKey, model, entry)
 	case types.ProviderAnthropic:
 		p, err = NewAnthropic(name, apiKey, model, entry)

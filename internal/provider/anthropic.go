@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -169,12 +170,12 @@ func anthropicMessageToResponse(msg *anthropic.Message) *types.Response {
 
 func convertMessagesAnthropic(msgs []types.Message) ([]anthropic.MessageParam, string) {
 	var out []anthropic.MessageParam
-	var systemPrompt string
+	var systemParts []string
 
 	for _, m := range msgs {
 		switch m.Role {
 		case types.RoleSystem:
-			systemPrompt = m.Content
+			systemParts = append(systemParts, m.Content)
 
 		case types.RoleUser:
 			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
@@ -209,6 +210,7 @@ func convertMessagesAnthropic(msgs []types.Message) ([]anthropic.MessageParam, s
 		}
 	}
 
+	systemPrompt := strings.Join(systemParts, "\n\n")
 	return out, systemPrompt
 }
 

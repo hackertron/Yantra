@@ -6,17 +6,18 @@ LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -
 
 .PHONY: build build-wasm build-all clean test lint
 
-## Build yantra binary (includes WASM guest)
-build: build-wasm
+## Build yantra binary
+build:
 	go build $(LDFLAGS) -o yantra ./cmd/yantra/
 
-## Build WASM guest for file tool sandbox
+## Build WASM guest for file tool sandbox (requires wasm/guest/)
 build-wasm:
+	@if [ ! -d wasm/guest ]; then echo "wasm/guest not yet created, skipping"; exit 0; fi
 	@mkdir -p internal/sandbox
 	cd wasm/guest && GOOS=wasip1 GOARCH=wasm go build -o ../../internal/sandbox/guest.wasm .
 
 ## Cross-compile for all platforms
-build-all: build-wasm
+build-all:
 	GOOS=linux  GOARCH=amd64 go build $(LDFLAGS) -o dist/yantra-linux-amd64  ./cmd/yantra/
 	GOOS=linux  GOARCH=arm64 go build $(LDFLAGS) -o dist/yantra-linux-arm64  ./cmd/yantra/
 	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o dist/yantra-darwin-arm64 ./cmd/yantra/
