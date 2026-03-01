@@ -18,6 +18,7 @@ type Message struct {
 	Content    string      `json:"content,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID string      `json:"tool_call_id,omitempty"`
+	ToolName   string      `json:"tool_name,omitempty"` // function name for tool-role messages (needed by Gemini)
 	CreatedAt  time.Time   `json:"created_at,omitempty"`
 }
 

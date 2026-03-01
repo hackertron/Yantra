@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/hackertron/Yantra/internal/types"
 	"google.golang.org/genai"
@@ -154,12 +155,12 @@ func geminiResultToResponse(result *genai.GenerateContentResponse) *types.Respon
 
 func convertMessagesGemini(msgs []types.Message) ([]*genai.Content, string) {
 	var contents []*genai.Content
-	var systemPrompt string
+	var systemParts []string
 
 	for _, m := range msgs {
 		switch m.Role {
 		case types.RoleSystem:
-			systemPrompt = m.Content
+			systemParts = append(systemParts, m.Content)
 
 		case types.RoleUser:
 			contents = append(contents, &genai.Content{
@@ -191,11 +192,16 @@ func convertMessagesGemini(msgs []types.Message) ([]*genai.Content, string) {
 			if err := json.Unmarshal([]byte(m.Content), &result); err != nil {
 				result = map[string]any{"result": m.Content}
 			}
+			// Gemini expects the function name, not the call ID
+			fnName := m.ToolName
+			if fnName == "" {
+				fnName = m.ToolCallID // fallback
+			}
 			contents = append(contents, &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{
-						Name:     m.ToolCallID,
+						Name:     fnName,
 						Response: result,
 					},
 				}},
@@ -203,6 +209,7 @@ func convertMessagesGemini(msgs []types.Message) ([]*genai.Content, string) {
 		}
 	}
 
+	systemPrompt := strings.Join(systemParts, "\n\n")
 	return contents, systemPrompt
 }
 

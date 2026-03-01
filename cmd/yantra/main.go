@@ -143,7 +143,10 @@ provider = "duckduckgo"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 `
 
-	target := "yantra.toml"
+	target := configPath
+	if target == "" {
+		target = "yantra.toml"
+	}
 	if _, err := os.Stat(target); err == nil {
 		return fmt.Errorf("%s already exists (use --config to specify a different path)", target)
 	}
@@ -152,7 +155,7 @@ provider = "duckduckgo"
 		return fmt.Errorf("writing config: %w", err)
 	}
 
-	fmt.Println("Created yantra.toml")
+	fmt.Printf("Created %s\n", target)
 	fmt.Println("")
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Set your provider API key:")
