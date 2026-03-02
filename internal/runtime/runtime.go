@@ -14,12 +14,14 @@ import (
 )
 
 // AgentRuntime ties a provider and tool registry together to execute the
-// think → act → observe turn loop.
+// think -> act -> observe turn loop.
 type AgentRuntime struct {
 	provider     types.Provider
 	tools        *tool.ToolRegistry
 	config       types.RuntimeConfig
 	workspaceDir string
+	memory       types.MemoryRetrieval
+	sessionID    string
 }
 
 // RunResult is the output of a successful Run invocation.
@@ -43,6 +45,12 @@ func New(provider types.Provider, tools *tool.ToolRegistry, config types.Runtime
 	}
 }
 
+// SetMemory configures persistent memory and session ID for the runtime.
+func (r *AgentRuntime) SetMemory(mem types.MemoryRetrieval, sessionID string) {
+	r.memory = mem
+	r.sessionID = sessionID
+}
+
 // Run executes the agent turn loop. It streams provider responses, dispatches
 // tool calls, and repeats until the LLM produces a final text response or
 // MaxTurns is exhausted. Progress events are sent on the optional progress
@@ -50,10 +58,26 @@ func New(provider types.Provider, tools *tool.ToolRegistry, config types.Runtime
 func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string, progress chan<- types.ProgressEvent) (*RunResult, error) {
 	session := NewSession(systemPrompt, r.tools.Schemas(nil))
 
-	session.Append(types.Message{
+	// If memory has a prior summary, prepend it.
+	if r.memory != nil && r.sessionID != "" {
+		if summary, err := r.memory.GetSummary(ctx, r.sessionID); err == nil && summary != nil && summary.Summary != "" {
+			session.Append(types.Message{
+				Role:    types.RoleUser,
+				Content: fmt.Sprintf("[Conversation Summary]\n%s", summary.Summary),
+			})
+			session.Append(types.Message{
+				Role:    types.RoleAssistant,
+				Content: "I have the context from our previous conversation. How can I help you?",
+			})
+		}
+	}
+
+	userMsg := types.Message{
 		Role:    types.RoleUser,
 		Content: userMessage,
-	})
+	}
+	session.Append(userMsg)
+	r.persistEvent(ctx, userMsg)
 
 	var totalUsage types.Usage
 	turnsUsed := 0
@@ -86,6 +110,7 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 
 		// Append assistant message.
 		session.Append(resp.Message)
+		r.persistEvent(ctx, resp.Message)
 
 		// If no tool calls, we're done.
 		if len(resp.Message.ToolCalls) == 0 {
@@ -102,6 +127,7 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 		turnCancel()
 		for _, msg := range toolMsgs {
 			session.Append(msg)
+			r.persistEvent(ctx, msg)
 		}
 
 		// Check if the parent context was cancelled during tool dispatch.
@@ -109,10 +135,20 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 			return nil, types.ErrCancelled
 		}
 
-		r.checkContextBudget(session)
+		r.checkContextBudget(ctx, session, progress)
 	}
 
 	return nil, types.ErrMaxTurns
+}
+
+// persistEvent stores a message to conversation history if memory is configured.
+func (r *AgentRuntime) persistEvent(ctx context.Context, msg types.Message) {
+	if r.memory == nil || r.sessionID == "" {
+		return
+	}
+	if err := r.memory.StoreConversationEvent(ctx, r.sessionID, msg); err != nil {
+		slog.Warn("failed to persist conversation event", "error", err)
+	}
 }
 
 // collectStream reads a streaming provider response and assembles it into a
@@ -216,6 +252,7 @@ func (r *AgentRuntime) dispatchTools(ctx context.Context, calls []types.ToolCall
 	results := make([]types.Message, len(calls))
 
 	execCtx := types.ToolExecutionContext{
+		SessionID:    r.sessionID,
 		WorkspaceDir: r.workspaceDir,
 		Progress:     progress,
 	}
@@ -291,9 +328,9 @@ func (r *AgentRuntime) classifyError(parent, turn context.Context, err error) er
 	return err
 }
 
-// checkContextBudget estimates token usage and logs a warning if the session
-// is approaching the context limit. Actual summarization is deferred to Step 5.
-func (r *AgentRuntime) checkContextBudget(session *Session) {
+// checkContextBudget estimates token usage and triggers summarization when the
+// session is approaching the context limit.
+func (r *AgentRuntime) checkContextBudget(ctx context.Context, session *Session, progress chan<- types.ProgressEvent) {
 	maxTokens := r.provider.MaxContextTokens()
 	if maxTokens <= 0 {
 		maxTokens = r.config.ContextBudget.FallbackMaxContextTokens
@@ -318,13 +355,131 @@ func (r *AgentRuntime) checkContextBudget(session *Session) {
 	estimatedTokens := totalChars / 4
 
 	threshold := int(float64(maxTokens) * triggerRatio)
-	if estimatedTokens > threshold {
-		slog.Warn("context budget warning: approaching limit",
+	if estimatedTokens <= threshold {
+		return
+	}
+
+	// Check minimum turns before summarizing.
+	minTurns := r.config.Summarization.MinTurns
+	if minTurns <= 0 {
+		minTurns = 6
+	}
+	if session.Len() < minTurns {
+		slog.Warn("context budget warning: approaching limit but too few turns to summarize",
+			"estimated_tokens", estimatedTokens,
+			"session_len", session.Len(),
+			"min_turns", minTurns,
+		)
+		return
+	}
+
+	// No memory/provider means we can't summarize — just warn.
+	if r.memory == nil {
+		slog.Warn("context budget warning: approaching limit, no memory configured for summarization",
 			"estimated_tokens", estimatedTokens,
 			"max_tokens", maxTokens,
-			"trigger_ratio", triggerRatio,
 		)
+		return
 	}
+
+	slog.Info("context budget: triggering summarization",
+		"estimated_tokens", estimatedTokens,
+		"max_tokens", maxTokens,
+		"trigger_ratio", triggerRatio,
+	)
+
+	emitProgress(progress, types.ProgressEvent{
+		Kind:    types.ProgressSummarization,
+		Message: "compacting conversation history",
+	})
+
+	// Build summarization prompt from messages to be compacted.
+	targetRatio := r.config.Summarization.TargetRatio
+	if targetRatio <= 0 {
+		targetRatio = 0.5
+	}
+	keepCount := int(float64(session.Len()) * (1.0 - targetRatio))
+	if keepCount < 2 {
+		keepCount = 2
+	}
+
+	msgs := session.Messages()
+	toSummarize := msgs[:len(msgs)-keepCount]
+
+	// Get existing summary if available.
+	var existingSummary string
+	if r.sessionID != "" {
+		if summary, err := r.memory.GetSummary(ctx, r.sessionID); err == nil && summary != nil {
+			existingSummary = summary.Summary
+		}
+	}
+
+	summaryPrompt := buildSummarizationPrompt(toSummarize, existingSummary)
+
+	// Use the provider to generate the summary.
+	summaryCtx := &types.Context{
+		Messages: []types.Message{
+			{Role: types.RoleSystem, Content: "You are a summarization assistant. Produce a concise summary of the conversation that captures all key facts, decisions, and context needed to continue the conversation."},
+			{Role: types.RoleUser, Content: summaryPrompt},
+		},
+	}
+
+	resp, err := r.provider.Complete(ctx, summaryCtx)
+	if err != nil {
+		slog.Error("summarization failed", "error", err)
+		return
+	}
+
+	summary := resp.Message.Content
+	if summary == "" {
+		return
+	}
+
+	// Store summary in memory.
+	if r.sessionID != "" {
+		epoch := int64(0)
+		if existing, err := r.memory.GetSummary(ctx, r.sessionID); err == nil && existing != nil {
+			epoch = existing.Epoch + 1
+		}
+		if err := r.memory.SetSummary(ctx, r.sessionID, types.SessionSummary{
+			Summary: summary,
+			Epoch:   epoch,
+		}); err != nil {
+			slog.Error("failed to store summary", "error", err)
+		}
+	}
+
+	// Compact the session.
+	session.CompactWithSummary(summary, keepCount)
+
+	slog.Info("summarization complete",
+		"kept_messages", keepCount,
+		"summary_len", len(summary),
+	)
+}
+
+// buildSummarizationPrompt constructs the prompt for the summarization LLM call.
+func buildSummarizationPrompt(messages []types.Message, existingSummary string) string {
+	var b strings.Builder
+
+	if existingSummary != "" {
+		b.WriteString("Previous conversation summary:\n")
+		b.WriteString(existingSummary)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("Summarize the following conversation, preserving all important facts, decisions, user preferences, and context:\n\n")
+
+	for _, msg := range messages {
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
+		if len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				b.WriteString(fmt.Sprintf("  -> called %s(%s)\n", tc.Function.Name, tc.Function.Arguments))
+			}
+		}
+	}
+
+	return b.String()
 }
 
 // emitProgress sends a progress event without blocking. If the channel is nil

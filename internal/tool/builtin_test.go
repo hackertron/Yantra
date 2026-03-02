@@ -249,7 +249,7 @@ func TestWebFetch_POST(t *testing.T) {
 func TestRegisterBuiltins(t *testing.T) {
 	policy := NewWorkspacePolicy(types.ShellConfig{})
 	r := NewRegistry(policy)
-	if err := RegisterBuiltins(r, types.ToolsConfig{}); err != nil {
+	if err := RegisterBuiltins(r, types.ToolsConfig{}, nil); err != nil {
 		t.Fatalf("RegisterBuiltins failed: %v", err)
 	}
 
