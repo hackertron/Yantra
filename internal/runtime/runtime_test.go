@@ -246,7 +246,7 @@ func TestRun_SimpleTextResponse(t *testing.T) {
 		},
 	}
 	reg := newTestRegistry()
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	result, err := rt.Run(context.Background(), "system", "What is 2+2?", nil)
 	if err != nil {
@@ -283,7 +283,7 @@ func TestRun_ToolCallThenResponse(t *testing.T) {
 		},
 	}
 	reg := newTestRegistry(mt)
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	result, err := rt.Run(context.Background(), "system", "add 2+2", nil)
 	if err != nil {
@@ -318,7 +318,7 @@ func TestRun_MaxTurnsExceeded(t *testing.T) {
 	reg := newTestRegistry(mt)
 	cfg := defaultRuntimeConfig()
 	cfg.MaxTurns = 3
-	rt := New(prov, reg, cfg)
+	rt := New(prov, reg, cfg, "")
 
 	_, err := rt.Run(context.Background(), "system", "go", nil)
 	if !errors.Is(err, types.ErrMaxTurns) {
@@ -329,7 +329,7 @@ func TestRun_MaxTurnsExceeded(t *testing.T) {
 func TestRun_ContextCancelled(t *testing.T) {
 	prov := &blockingProvider{}
 	reg := newTestRegistry()
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel after a short delay.
@@ -394,7 +394,7 @@ func TestRun_ToolDispatchOrdering(t *testing.T) {
 		},
 	}
 	reg := newTestRegistry(toolA, toolB, toolC)
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	result, err := rt.Run(context.Background(), "system", "go", nil)
 	if err != nil {
@@ -435,7 +435,7 @@ func TestCollectStream_FragmentedToolCalls(t *testing.T) {
 
 	// We test collectStream directly by creating a runtime with a session.
 	reg := newTestRegistry()
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	session := NewSession("sys", nil)
 	session.Append(types.Message{Role: types.RoleUser, Content: "test"})
@@ -487,7 +487,7 @@ func TestRun_ToolExecutionError(t *testing.T) {
 		},
 	}
 	reg := newTestRegistry(mt)
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	result, err := rt.Run(context.Background(), "system", "do it", nil)
 	if err != nil {
@@ -512,7 +512,7 @@ func TestRun_ProgressEvents(t *testing.T) {
 	}
 	mt := &mockTool{name: "mytool", tier: types.ReadOnly}
 	reg := newTestRegistry(mt)
-	rt := New(prov, reg, defaultRuntimeConfig())
+	rt := New(prov, reg, defaultRuntimeConfig(), "")
 
 	progress := make(chan types.ProgressEvent, 32)
 	_, err := rt.Run(context.Background(), "system", "go", progress)
@@ -536,5 +536,80 @@ func TestRun_ProgressEvents(t *testing.T) {
 	}
 	if toolExecs < 1 {
 		t.Errorf("expected at least 1 ProgressToolExecution event, got %d", toolExecs)
+	}
+}
+
+func TestRun_TurnTimeout(t *testing.T) {
+	// The blocking provider never completes, so the 1-second turn timeout
+	// fires. The runtime should return ErrTimeout (not ErrCancelled)
+	// because the parent context is still alive.
+	prov := &blockingProvider{}
+	rt := New(prov, newTestRegistry(), types.RuntimeConfig{
+		MaxTurns:        10,
+		TurnTimeoutSecs: 1,
+		ContextBudget: types.ContextBudgetConfig{
+			TriggerRatio:             0.85,
+			FallbackMaxContextTokens: 128000,
+		},
+	}, "")
+
+	start := time.Now()
+	_, err := rt.Run(context.Background(), "system", "hello", nil)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, types.ErrTimeout) {
+		t.Errorf("expected ErrTimeout, got %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("expected turn to timeout around 1s, took %v", elapsed)
+	}
+}
+
+func TestRun_TurnTimeoutDuringToolExecution(t *testing.T) {
+	// Provider streams instantly, but the tool blocks for 2s.
+	// With a 1-second turn timeout covering both phases, the tool
+	// should be interrupted and the error surfaced to the LLM.
+	slowTool := &mockTool{
+		name: "slow",
+		tier: types.ReadOnly,
+		execFunc: func(ctx context.Context, input json.RawMessage) (string, error) {
+			select {
+			case <-time.After(2 * time.Second):
+				return "done", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
+	}
+
+	prov := &scriptedProvider{
+		responses: []*types.Response{
+			toolCallResponse([]types.ToolCall{
+				{ID: "call_1", Function: types.FunctionCall{Name: "slow", Arguments: `{}`}},
+			}, 10, 5),
+			// After tool timeout, the tool result (with error) goes back to
+			// the provider, which returns a final text response.
+			textResponse("tool timed out, moving on", 20, 5),
+		},
+	}
+	reg := newTestRegistry(slowTool)
+	rt := New(prov, reg, types.RuntimeConfig{
+		MaxTurns:        10,
+		TurnTimeoutSecs: 1,
+		ContextBudget: types.ContextBudgetConfig{
+			TriggerRatio:             0.85,
+			FallbackMaxContextTokens: 128000,
+		},
+	}, "")
+
+	result, err := rt.Run(context.Background(), "system", "go", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FinalContent != "tool timed out, moving on" {
+		t.Errorf("unexpected content: %q", result.FinalContent)
+	}
+	if result.TurnsUsed != 2 {
+		t.Errorf("expected 2 turns, got %d", result.TurnsUsed)
 	}
 }

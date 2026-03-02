@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/hackertron/Yantra/internal/provider"
 	"github.com/hackertron/Yantra/internal/runtime"
@@ -206,7 +207,12 @@ func runAgent(prompt, systemPrompt, workspace string) error {
 		return fmt.Errorf("registering tools: %w", err)
 	}
 
-	rt := runtime.New(p, reg, cfg.Runtime)
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return fmt.Errorf("resolving workspace: %w", err)
+	}
+
+	rt := runtime.New(p, reg, cfg.Runtime, absWorkspace)
 
 	progress := make(chan types.ProgressEvent, 32)
 	go func() {

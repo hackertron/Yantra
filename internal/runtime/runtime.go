@@ -16,9 +16,10 @@ import (
 // AgentRuntime ties a provider and tool registry together to execute the
 // think → act → observe turn loop.
 type AgentRuntime struct {
-	provider types.Provider
-	tools    *tool.ToolRegistry
-	config   types.RuntimeConfig
+	provider     types.Provider
+	tools        *tool.ToolRegistry
+	config       types.RuntimeConfig
+	workspaceDir string
 }
 
 // RunResult is the output of a successful Run invocation.
@@ -28,12 +29,17 @@ type RunResult struct {
 	TotalUsage   types.Usage
 }
 
-// New creates an AgentRuntime.
-func New(provider types.Provider, tools *tool.ToolRegistry, config types.RuntimeConfig) *AgentRuntime {
+// New creates an AgentRuntime. workspaceDir is the root directory for tool
+// file-path containment checks; pass "." or an absolute path.
+func New(provider types.Provider, tools *tool.ToolRegistry, config types.RuntimeConfig, workspaceDir string) *AgentRuntime {
+	if workspaceDir == "" {
+		workspaceDir = "."
+	}
 	return &AgentRuntime{
-		provider: provider,
-		tools:    tools,
-		config:   config,
+		provider:     provider,
+		tools:        tools,
+		config:       config,
+		workspaceDir: workspaceDir,
 	}
 }
 
@@ -58,7 +64,7 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 	}
 
 	for turn := 0; turn < maxTurns; turn++ {
-		// Per-turn timeout.
+		// Per-turn timeout covers both provider streaming and tool execution.
 		turnCtx, turnCancel := context.WithTimeout(ctx, r.config.TurnTimeout())
 
 		emitProgress(progress, types.ProgressEvent{
@@ -67,12 +73,9 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 		})
 
 		resp, err := r.collectStream(turnCtx, session)
-		turnCancel()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, types.ErrCancelled
-			}
-			return nil, err
+			turnCancel()
+			return nil, r.classifyError(ctx, turnCtx, err)
 		}
 
 		// Accumulate usage.
@@ -86,6 +89,7 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 
 		// If no tool calls, we're done.
 		if len(resp.Message.ToolCalls) == 0 {
+			turnCancel()
 			return &RunResult{
 				FinalContent: resp.Message.Content,
 				TurnsUsed:    turnsUsed,
@@ -93,10 +97,16 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 			}, nil
 		}
 
-		// Dispatch tool calls and append results.
-		toolMsgs := r.dispatchTools(ctx, resp.Message.ToolCalls, progress)
+		// Dispatch tool calls under the same turn timeout.
+		toolMsgs := r.dispatchTools(turnCtx, resp.Message.ToolCalls, progress)
+		turnCancel()
 		for _, msg := range toolMsgs {
 			session.Append(msg)
+		}
+
+		// Check if the parent context was cancelled during tool dispatch.
+		if ctx.Err() != nil {
+			return nil, types.ErrCancelled
 		}
 
 		r.checkContextBudget(session)
@@ -220,7 +230,8 @@ func (r *AgentRuntime) dispatchTools(ctx context.Context, calls []types.ToolCall
 	}
 
 	execCtx := types.ToolExecutionContext{
-		Progress: progress,
+		WorkspaceDir: r.workspaceDir,
+		Progress:     progress,
 	}
 
 	// ReadOnly: execute in parallel.
@@ -265,6 +276,19 @@ func (r *AgentRuntime) executeTool(ctx context.Context, call types.ToolCall, exe
 		ToolCallID: call.ID,
 		ToolName:   call.Function.Name,
 	}
+}
+
+// classifyError maps context errors to the appropriate runtime sentinel.
+// If the parent ctx was cancelled, it's a user cancellation. If only the
+// turn ctx expired, it's a turn timeout.
+func (r *AgentRuntime) classifyError(parent, turn context.Context, err error) error {
+	if parent.Err() != nil {
+		return types.ErrCancelled
+	}
+	if turn.Err() == context.DeadlineExceeded {
+		return types.ErrTimeout
+	}
+	return err
 }
 
 // checkContextBudget estimates token usage and logs a warning if the session
