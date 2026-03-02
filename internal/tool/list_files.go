@@ -48,7 +48,10 @@ func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage, exec
 		return "", fmt.Errorf("invalid input: %w", err)
 	}
 
-	resolved := resolvePath(args.Path, execCtx.WorkspaceDir)
+	resolved, err := ResolvePath(args.Path, execCtx.WorkspaceDir)
+	if err != nil {
+		return "", err
+	}
 
 	if !args.Recursive {
 		return listFlat(ctx, resolved)
@@ -94,7 +97,10 @@ func listRecursive(ctx context.Context, root string, maxDepth int) (string, erro
 			return nil // skip entries we can't read
 		}
 
-		rel, _ := filepath.Rel(rootClean, path)
+		rel, errRel := filepath.Rel(rootClean, path)
+		if errRel != nil {
+			return nil
+		}
 		if rel == "." {
 			return nil
 		}

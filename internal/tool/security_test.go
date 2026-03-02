@@ -107,6 +107,7 @@ func TestWorkspacePolicy_OperatorsBlocked(t *testing.T) {
 		"cmd1 || cmd2",
 		"cmd1 ; cmd2",
 		"echo foo > file",
+		"sleep 999 &",
 	}
 
 	for _, cmd := range operators {

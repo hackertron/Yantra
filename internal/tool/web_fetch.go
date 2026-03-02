@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hackertron/Yantra/internal/types"
@@ -52,19 +53,14 @@ func (t *webFetchTool) Execute(ctx context.Context, input json.RawMessage, execC
 		return "", fmt.Errorf("invalid input: %w", err)
 	}
 
-	method := args.Method
+	method := strings.ToUpper(args.Method)
 	if method == "" {
 		method = "GET"
 	}
 
 	var bodyReader io.Reader
 	if args.Body != "" {
-		bodyReader = io.NopCloser(
-			io.LimitReader(
-				readerFromString(args.Body),
-				webFetchMaxBody,
-			),
-		)
+		bodyReader = io.LimitReader(strings.NewReader(args.Body), webFetchMaxBody)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, args.URL, bodyReader)
@@ -98,22 +94,4 @@ func (t *webFetchTool) Execute(ctx context.Context, input json.RawMessage, execC
 	}
 
 	return fmt.Sprintf("status: %d\n\n%s", resp.StatusCode, string(body)), nil
-}
-
-type stringReader struct {
-	s string
-	i int
-}
-
-func readerFromString(s string) io.Reader {
-	return &stringReader{s: s}
-}
-
-func (r *stringReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.s) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.s[r.i:])
-	r.i += n
-	return n, nil
 }

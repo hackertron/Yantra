@@ -103,12 +103,15 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 		}
 	}
 
-	// Emit progress event.
+	// Emit progress event (non-blocking to avoid deadlock on full channel).
 	if execCtx.Progress != nil {
-		execCtx.Progress <- types.ProgressEvent{
+		select {
+		case execCtx.Progress <- types.ProgressEvent{
 			Kind:    types.ProgressToolExecution,
 			Tool:    name,
 			Message: "executing",
+		}:
+		default:
 		}
 	}
 

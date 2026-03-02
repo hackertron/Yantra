@@ -47,7 +47,10 @@ func (t *writeFileTool) Execute(ctx context.Context, input json.RawMessage, exec
 		return "", fmt.Errorf("invalid input: %w", err)
 	}
 
-	resolved := resolvePath(args.Path, execCtx.WorkspaceDir)
+	resolved, err := ResolvePath(args.Path, execCtx.WorkspaceDir)
+	if err != nil {
+		return "", err
+	}
 
 	// Create parent directories.
 	dir := filepath.Dir(resolved)

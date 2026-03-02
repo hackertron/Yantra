@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -52,7 +51,10 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage, execC
 		return "", fmt.Errorf("invalid input: %w", err)
 	}
 
-	resolved := resolvePath(args.Path, execCtx.WorkspaceDir)
+	resolved, err := ResolvePath(args.Path, execCtx.WorkspaceDir)
+	if err != nil {
+		return "", err
+	}
 
 	f, err := os.Open(resolved)
 	if err != nil {
@@ -99,10 +101,3 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage, execC
 	return b.String(), nil
 }
 
-// resolvePath resolves a tool path argument relative to the workspace.
-func resolvePath(path, workspace string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(filepath.Join(workspace, path))
-}

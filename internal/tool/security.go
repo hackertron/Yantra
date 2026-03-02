@@ -51,7 +51,7 @@ var defaultDenylist = []string{
 }
 
 // shellOperators are the shell metacharacters blocked when AllowOperators is false.
-var shellOperators = []string{"|", "&&", "||", ";", ">", ">>", "<", "$(", "`"}
+var shellOperators = []string{"|", "&&", "||", ";", ">", ">>", "<", "$(", "`", "&"}
 
 // NewWorkspacePolicy creates a WorkspacePolicy from a ShellConfig.
 func NewWorkspacePolicy(cfg types.ShellConfig) *WorkspacePolicy {
@@ -106,13 +106,15 @@ func (p *WorkspacePolicy) checkFilePath(input json.RawMessage, workspace string)
 	if args.Path == "" {
 		return fmt.Errorf("security: path is required")
 	}
-	return ValidatePath(args.Path, workspace)
+	_, err := ResolvePath(args.Path, workspace)
+	return err
 }
 
-// ValidatePath checks that resolved resolves within workspace.
-func ValidatePath(path, workspace string) error {
+// ResolvePath resolves a tool path argument relative to the workspace and validates
+// that the result stays within the workspace. Returns the resolved absolute path.
+func ResolvePath(path, workspace string) (string, error) {
 	if workspace == "" {
-		return fmt.Errorf("security: workspace directory not set")
+		return "", fmt.Errorf("security: workspace directory not set")
 	}
 
 	var resolved string
@@ -125,10 +127,10 @@ func ValidatePath(path, workspace string) error {
 	// The resolved path must be the workspace itself or a child of it.
 	wsClean := filepath.Clean(workspace)
 	if resolved != wsClean && !strings.HasPrefix(resolved, wsClean+string(filepath.Separator)) {
-		return fmt.Errorf("security: path %q resolves outside workspace %q", path, workspace)
+		return "", fmt.Errorf("security: path %q resolves outside workspace %q", path, workspace)
 	}
 
-	return nil
+	return resolved, nil
 }
 
 // checkShellCommand validates the command against allow/deny lists and operator restrictions.
