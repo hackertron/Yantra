@@ -1,9 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
+	"github.com/hackertron/Yantra/internal/provider"
+	"github.com/hackertron/Yantra/internal/runtime"
+	"github.com/hackertron/Yantra/internal/tool"
+	"github.com/hackertron/Yantra/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -30,13 +38,17 @@ Single binary. Zero config to get started.`,
 
 	root.AddCommand(
 		initCmd(),
+		runCmd(),
 		startCmd(),
 		tuiCmd(),
 		serveCmd(),
 		versionCmd(),
 	)
 
-	if err := root.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -162,6 +174,76 @@ provider = "duckduckgo"
 	fmt.Println("     export OPENAI_API_KEY=sk-...")
 	fmt.Println("  2. Start chatting:")
 	fmt.Println("     yantra tui")
+	return nil
+}
+
+func runCmd() *cobra.Command {
+	var systemPrompt string
+	var workspace string
+
+	cmd := &cobra.Command{
+		Use:   "run [prompt]",
+		Short: "Run a single agent turn loop with the given prompt",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAgent(cmd.Context(), args[0], systemPrompt, workspace)
+		},
+	}
+	cmd.Flags().StringVar(&systemPrompt, "system", "You are a helpful AI assistant with access to tools.", "system prompt")
+	cmd.Flags().StringVar(&workspace, "workspace", ".", "workspace directory for tool execution")
+	return cmd
+}
+
+func runAgent(ctx context.Context, prompt, systemPrompt, workspace string) error {
+	cfg, err := types.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	p, err := provider.BuildFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("building provider: %w", err)
+	}
+	p = provider.NewReliable(p, provider.DefaultReliableConfig())
+
+	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
+	reg := tool.NewRegistry(policy)
+	if err := tool.RegisterBuiltins(reg, cfg.Tools); err != nil {
+		return fmt.Errorf("registering tools: %w", err)
+	}
+
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return fmt.Errorf("resolving workspace: %w", err)
+	}
+
+	rt := runtime.New(p, reg, cfg.Runtime, absWorkspace)
+
+	progress := make(chan types.ProgressEvent, 32)
+	go func() {
+		for ev := range progress {
+			if ev.Tool != "" {
+				fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", ev.Kind, ev.Tool, ev.Message)
+			} else {
+				fmt.Fprintf(os.Stderr, "[%s] %s\n", ev.Kind, ev.Message)
+			}
+		}
+	}()
+
+	result, err := rt.Run(ctx, systemPrompt, prompt, progress)
+	close(progress)
+	if err != nil {
+		return fmt.Errorf("agent run failed: %w", err)
+	}
+
+	fmt.Println(result.FinalContent)
+	fmt.Fprintf(os.Stderr, "\n--- stats ---\n")
+	fmt.Fprintf(os.Stderr, "turns: %d\n", result.TurnsUsed)
+	fmt.Fprintf(os.Stderr, "tokens: %d prompt, %d completion, %d total\n",
+		result.TotalUsage.PromptTokens,
+		result.TotalUsage.CompletionTokens,
+		result.TotalUsage.TotalTokens,
+	)
 	return nil
 }
 

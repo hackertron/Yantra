@@ -78,7 +78,7 @@ One of three values:
 - `SideEffecting` — changes state (writing files, making HTTP requests)
 - `Privileged` — potentially dangerous (running shell commands)
 
-The runtime uses these to decide execution strategy. ReadOnly tools can run in parallel. SideEffecting tools run sequentially. Privileged tools might prompt the user for confirmation.
+The runtime uses these to decide execution strategy. Contiguous ReadOnly tools run in parallel; SideEffecting and Privileged tools run sequentially at their original position in the call list. This preserves model-provided ordering for cross-tool dependencies (e.g., `write_file` then `read_file`) while maximizing parallelism where safe.
 
 ### Timeout()
 

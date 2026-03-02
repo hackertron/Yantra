@@ -14,9 +14,11 @@ Think of it as building your own Claude Code / Cursor agent from scratch.
 ┌─────────────────────────────────────────────┐
 │                    CLI                       │
 │              cmd/yantra/main.go              │
+│         yantra init | run | version          │
 ├─────────────────────────────────────────────┤
-│               Runtime (Step 4)               │
-│         the agent turn loop (planned)        │
+│                  Runtime                     │
+│           agent turn loop + session          │
+│     stream → think → act → observe → loop   │
 ├──────────────┬──────────────┬───────────────┤
 │   Provider   │    Tools     │    Memory     │
 │   Layer      │   System     │   (Step 5)    │
@@ -41,14 +43,25 @@ go build ./...
 # Generate default config
 go run ./cmd/yantra init
 
-# Edit yantra.toml with your API keys
+# Edit yantra.toml — set your API key
 $EDITOR yantra.toml
+
+# Set your provider API key
+export OPENAI_API_KEY=sk-...
+# Or for Anthropic:
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Run the agent
+go run ./cmd/yantra run "What is 2+2? Answer briefly."
+
+# Run with a custom system prompt and workspace
+go run ./cmd/yantra run --system "You are a Go expert" --workspace ./myproject "add tests for main.go"
 ```
 
 ## Project structure
 
 ```
-cmd/yantra/           CLI entry point (init, version, start, serve, tui)
+cmd/yantra/           CLI entry point (init, run, version, start, serve, tui)
 internal/
   types/              Shared interfaces and data types
     config.go         Configuration structs + defaults
@@ -67,6 +80,9 @@ internal/
     anthropic.go      Anthropic Messages API
     gemini.go         Google Gemini GenerateContent
     reliable.go       Retry wrapper with exponential backoff
+  runtime/            Agent turn loop
+    session.go        In-memory conversation buffer
+    runtime.go        AgentRuntime, Run(), stream accumulation, tool dispatch
   tool/               Tool system
     schema.go         JSON Schema builder helpers
     security.go       SecurityPolicy + WorkspacePolicy
@@ -118,6 +134,22 @@ All tool execution goes through a `SecurityPolicy`:
 - **Shell denylist**: dangerous commands blocked (sudo, rm, mkfs, shutdown, etc.)
 - **Operator blocking**: `|`, `&&`, `||`, `;`, `>` blocked by default (configurable)
 - Deny always overrides allow
+
+## Runtime
+
+The runtime is the core agent loop that ties providers and tools together:
+
+1. User message is added to an in-memory session
+2. Session context (system prompt + messages + tool schemas) is streamed to the provider
+3. Response is accumulated, including fragmented tool call deltas
+4. If the LLM returns tool calls, they're dispatched respecting safety tiers:
+   - **ReadOnly** tools in a contiguous block run in parallel
+   - **SideEffecting/Privileged** tools run sequentially at their original position
+   - Model-provided tool call order is preserved (e.g., `write_file` before `read_file`)
+5. Tool results are appended to the session, and the loop repeats
+6. When the LLM responds with text only (no tool calls), the loop ends
+
+The turn timeout covers both provider streaming and tool execution as a single budget. Ctrl-C (SIGINT/SIGTERM) propagates cleanly into the runtime via context cancellation.
 
 ## Tests
 

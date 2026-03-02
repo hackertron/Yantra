@@ -112,7 +112,7 @@ max_cost = 0.0             # Max dollar cost (0 = unlimited)
 
 **max_turns** prevents infinite loops. If the LLM keeps calling tools without converging on an answer, this stops it.
 
-**turn_timeout_secs** is the timeout for a single turn (LLM call + tool executions). Not per-tool — that's the tool's own Timeout().
+**turn_timeout_secs** is the timeout for a single turn. It covers both the provider streaming phase and tool execution as one budget. Individual tools also have their own Timeout() applied by the registry.
 
 **max_cost** tracks token usage cost and stops if exceeded. Useful for preventing runaway spend.
 
