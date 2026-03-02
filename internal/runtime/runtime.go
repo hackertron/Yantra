@@ -206,39 +206,33 @@ func buildToolCalls(partials map[int]*toolCallPartial) []types.ToolCall {
 	return calls
 }
 
-// dispatchTools executes tool calls respecting safety tiers: ReadOnly tools
-// run in parallel, SideEffecting/Privileged tools run sequentially.
-// Results are returned in the same order as the input calls.
+// dispatchTools executes tool calls respecting both the model-provided order
+// and safety tiers. Contiguous runs of ReadOnly calls execute in parallel;
+// any SideEffecting/Privileged call executes sequentially at its original
+// position (after flushing any pending ReadOnly block). This preserves
+// ordering for cross-tool dependencies (e.g., write_file then read_file)
+// while retaining parallelism where it's safe.
 func (r *AgentRuntime) dispatchTools(ctx context.Context, calls []types.ToolCall, progress chan<- types.ProgressEvent) []types.Message {
 	results := make([]types.Message, len(calls))
-
-	// Partition by safety tier.
-	type indexedCall struct {
-		idx  int
-		call types.ToolCall
-	}
-	var readOnly []indexedCall
-	var sequential []indexedCall
-
-	for i, call := range calls {
-		t := r.tools.Get(call.Function.Name)
-		if t != nil && t.SafetyTier() == types.ReadOnly {
-			readOnly = append(readOnly, indexedCall{i, call})
-		} else {
-			sequential = append(sequential, indexedCall{i, call})
-		}
-	}
 
 	execCtx := types.ToolExecutionContext{
 		WorkspaceDir: r.workspaceDir,
 		Progress:     progress,
 	}
 
-	// ReadOnly: execute in parallel.
-	if len(readOnly) > 0 {
+	type indexedCall struct {
+		idx  int
+		call types.ToolCall
+	}
+
+	// flushReadOnly executes a contiguous block of ReadOnly calls in parallel.
+	flushReadOnly := func(block []indexedCall) {
+		if len(block) == 0 {
+			return
+		}
 		var wg sync.WaitGroup
-		wg.Add(len(readOnly))
-		for _, ic := range readOnly {
+		wg.Add(len(block))
+		for _, ic := range block {
 			go func(ic indexedCall) {
 				defer wg.Done()
 				results[ic.idx] = r.executeTool(ctx, ic.call, execCtx)
@@ -247,10 +241,21 @@ func (r *AgentRuntime) dispatchTools(ctx context.Context, calls []types.ToolCall
 		wg.Wait()
 	}
 
-	// Sequential: execute in order.
-	for _, ic := range sequential {
-		results[ic.idx] = r.executeTool(ctx, ic.call, execCtx)
+	var readOnlyBlock []indexedCall
+
+	for i, call := range calls {
+		t := r.tools.Get(call.Function.Name)
+		if t != nil && t.SafetyTier() == types.ReadOnly {
+			readOnlyBlock = append(readOnlyBlock, indexedCall{i, call})
+			continue
+		}
+		// Non-ReadOnly: flush any pending ReadOnly block first, then run sequentially.
+		flushReadOnly(readOnlyBlock)
+		readOnlyBlock = nil
+		results[i] = r.executeTool(ctx, call, execCtx)
 	}
+	// Flush any trailing ReadOnly block.
+	flushReadOnly(readOnlyBlock)
 
 	return results
 }
@@ -259,12 +264,7 @@ func (r *AgentRuntime) dispatchTools(ctx context.Context, calls []types.ToolCall
 // Tool errors are placed in the message content (the LLM sees them),
 // not returned as Go errors.
 func (r *AgentRuntime) executeTool(ctx context.Context, call types.ToolCall, execCtx types.ToolExecutionContext) types.Message {
-	emitProgress(execCtx.Progress, types.ProgressEvent{
-		Kind:    types.ProgressToolExecution,
-		Tool:    call.Function.Name,
-		Message: "executing",
-	})
-
+	// Progress emission is handled by ToolRegistry.Execute to avoid duplicates.
 	output, err := r.tools.Execute(ctx, call.Function.Name, json.RawMessage(call.Function.Arguments), execCtx)
 	if err != nil {
 		output = "Error: " + err.Error()

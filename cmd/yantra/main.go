@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/hackertron/Yantra/internal/provider"
 	"github.com/hackertron/Yantra/internal/runtime"
@@ -43,7 +45,10 @@ Single binary. Zero config to get started.`,
 		versionCmd(),
 	)
 
-	if err := root.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -181,7 +186,7 @@ func runCmd() *cobra.Command {
 		Short: "Run a single agent turn loop with the given prompt",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAgent(args[0], systemPrompt, workspace)
+			return runAgent(cmd.Context(), args[0], systemPrompt, workspace)
 		},
 	}
 	cmd.Flags().StringVar(&systemPrompt, "system", "You are a helpful AI assistant with access to tools.", "system prompt")
@@ -189,7 +194,7 @@ func runCmd() *cobra.Command {
 	return cmd
 }
 
-func runAgent(prompt, systemPrompt, workspace string) error {
+func runAgent(ctx context.Context, prompt, systemPrompt, workspace string) error {
 	cfg, err := types.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -225,7 +230,7 @@ func runAgent(prompt, systemPrompt, workspace string) error {
 		}
 	}()
 
-	result, err := rt.Run(context.Background(), systemPrompt, prompt, progress)
+	result, err := rt.Run(ctx, systemPrompt, prompt, progress)
 	close(progress)
 	if err != nil {
 		return fmt.Errorf("agent run failed: %w", err)
