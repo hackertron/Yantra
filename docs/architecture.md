@@ -38,6 +38,7 @@ Everything in Yantra exists to make this loop work well:
 - **Tools** give the LLM hands
 - **Security** prevents the LLM from doing damage
 - **Config** makes it all customizable
+- **Runtime** runs the think → act → observe loop
 - **Memory** (planned) lets the agent remember across sessions
 - **Gateway** (planned) lets you control it remotely
 
@@ -129,10 +130,10 @@ const (
 )
 ```
 
-These tiers inform the runtime how to handle tools:
-- **ReadOnly** tools can run in parallel safely
-- **SideEffecting** tools should run sequentially (they change state)
-- **Privileged** tools need extra checks and may require user confirmation
+These tiers inform the runtime how to dispatch tools:
+- **ReadOnly** tools run in parallel when contiguous in the call list
+- **SideEffecting** tools run sequentially (they change state)
+- **Privileged** tools run sequentially and may require user confirmation in future
 
 ### Configuration
 
@@ -385,49 +386,106 @@ type ToolExecutionContext struct {
 `WorkspaceDir` is the most important — it's the root directory for all file operations. `Progress` is an optional channel for emitting status updates (the gateway can forward these to the UI).
 
 
-## How the pieces connect
+## Layer 4: Runtime (`internal/runtime/`)
 
-Here's how everything flows when the runtime (Step 4) is built:
+The runtime is the brain — it ties providers and tools together in a turn loop.
+
+### Session buffer
+
+`Session` is an in-memory conversation buffer. The system prompt is stored separately and injected by `Context()` when building the payload for the provider. This keeps the message list clean for turn counting and future summarization.
+
+```go
+session := NewSession("You are a helpful assistant.", toolSchemas)
+session.Append(Message{Role: "user", Content: "fix the bug"})
+
+ctx := session.Context()
+// → Messages: [system prompt, user message]
+// → Tools: [read_file, write_file, ...]
+```
+
+### The turn loop
+
+`AgentRuntime.Run()` is the main entry point:
 
 ```
 1. User runs: yantra run "add error handling to server.go"
 
-2. CLI loads config (yantra.toml + env vars)
-   → YantraConfig
+2. CLI loads config, builds provider + registry + runtime
 
-3. Build provider from config
-   → ReliableProvider(OpenAIProvider{model: "gpt-4o"})
+3. TURN LOOP (up to MaxTurns):
+   a. Per-turn timeout covers streaming + tool dispatch
+   b. Stream provider response, accumulate text + tool call deltas
+   c. If tool calls present:
+      - Dispatch respecting safety tiers and model-provided order
+      - Contiguous ReadOnly calls run in parallel
+      - SideEffecting/Privileged calls run sequentially at original position
+      - Tool results appended to session
+   d. If text-only response → return result (done)
+   e. Check context budget (log warning if approaching limit)
 
-4. Create tool registry with workspace policy
-   → RegisterBuiltins(registry, config.Tools)
-   → registry has: read_file, write_file, list_files, shell_exec, web_fetch
+4. Return: FinalContent, TurnsUsed, TotalUsage
+```
 
-5. Get tool schemas for LLM
-   → registry.Schemas(nil) → []FunctionDecl
+### Stream accumulation
 
-6. Build initial messages
-   → [system prompt, user message]
+The provider returns a channel of `StreamItem`. The runtime's `collectStream()` method:
+- Accumulates `StreamText` into the response content
+- Reassembles `StreamToolCallDelta` fragments into complete `ToolCall` objects (keyed by index)
+- Captures final `Usage` from the `StreamDone` event
+- Propagates `StreamError` as a Go error
 
-7. AGENT LOOP:
-   a. Call provider.Complete(ctx, &Context{Messages, Tools})
-   b. LLM returns Message with ToolCalls
-   c. For each ToolCall:
-      - registry.Execute(ctx, name, args, execCtx)
-      - Policy check → timeout → execute → truncate
-      - Create tool result Message
-   d. Append assistant message + tool results to history
-   e. Check budget (turns, tokens, cost)
-   f. Go to step a
+Tool call deltas arrive in chunks — the first delta for an index carries `ID` + `Name`, subsequent deltas append to `Arguments` via a `strings.Builder`. This handles all three providers (OpenAI, Anthropic, Gemini) uniformly.
 
-8. LLM returns text-only response → done
-   → Print final answer to user
+### Tool dispatch ordering
+
+Tools are dispatched in model-provided order with parallelism for contiguous ReadOnly blocks:
+
+```
+Call order from LLM: [read_file, read_file, write_file, read_file]
+                      ├─ parallel ─┤  sequential    sequential
+
+Block 1: read_file + read_file → parallel (both ReadOnly)
+Block 2: write_file → sequential (SideEffecting)
+Block 3: read_file → sequential (ReadOnly, but after a side effect)
+```
+
+This preserves correctness for patterns like `write_file → read_file` (verify what was written) while maximizing parallelism where safe.
+
+### Error handling
+
+The runtime classifies errors:
+- Parent context cancelled → `ErrCancelled` (user pressed Ctrl-C)
+- Turn context deadline exceeded → `ErrTimeout` (turn budget exhausted)
+- Max turns reached → `ErrMaxTurns`
+- Tool execution errors → placed in message content (the LLM sees them and can recover)
+
+### Context budget
+
+After each tool dispatch, the runtime estimates token usage (chars/4) and logs a warning if the session is approaching the context limit (`TriggerRatio * MaxContextTokens`). Actual summarization is deferred to Step 5 (Memory).
+
+## How the pieces connect
+
+```
+yantra run "add error handling to server.go"
+  │
+  ├── LoadConfig()                → YantraConfig
+  ├── BuildFromConfig()           → ReliableProvider(OpenAIProvider)
+  ├── NewWorkspacePolicy()        → SecurityPolicy
+  ├── NewRegistry() + RegisterBuiltins() → ToolRegistry
+  └── runtime.New() + Run()       → AgentRuntime turn loop
+       │
+       ├── Session.Context()      → system prompt + messages + tool schemas
+       ├── provider.Stream()      → channel of StreamItem
+       ├── collectStream()        → assembled Response with ToolCalls
+       ├── dispatchTools()        → tool results (parallel ReadOnly, sequential others)
+       ├── checkContextBudget()   → warning if approaching limit
+       └── loop until text-only response or MaxTurns
 ```
 
 ## What's next
 
 | Step | What | Purpose |
 |------|------|---------|
-| 4 | Runtime | The agent turn loop — the brain that ties providers + tools together |
-| 5 | Memory | Persistent vector DB for cross-session recall |
+| 5 | Memory | Persistent vector DB for cross-session recall + rolling summarization |
 | 6 | Gateway | WebSocket server for remote control |
 | 7 | Multi-agent | Specialist subagents with delegation |
