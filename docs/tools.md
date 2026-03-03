@@ -375,6 +375,48 @@ status: 200
 - No cookie handling
 - No redirect following configuration (uses Go's default: follows up to 10 redirects)
 
+### memory_save
+
+**Purpose:** Persist knowledge for future recall across sessions.
+
+**Parameters:**
+| Name    | Type           | Required | Description |
+|---------|----------------|----------|-------------|
+| content | string         | yes      | The knowledge to store |
+| tags    | array (string) | no       | Optional tags for categorization |
+
+**Behavior:**
+- Calls `mem.Store()` with source `"user_saved"`
+- If an embedding backend is configured, computes and stores the embedding alongside the content
+- Returns: `"Saved to memory (id: <hex>)"`
+
+**Safety tier:** SideEffecting (15s timeout)
+
+### memory_search
+
+**Purpose:** Search persistent memory using hybrid retrieval (vector + full-text).
+
+**Parameters:**
+| Name  | Type    | Required | Default | Description |
+|-------|---------|----------|---------|-------------|
+| query | string  | yes      | —       | Search query (used for both semantic and keyword matching) |
+| top_k | integer | no       | 5       | Maximum number of results to return |
+
+**Output format:**
+```
+1. [score: 0.85] Content of the memory chunk
+   Tags: tag1, tag2
+
+2. [score: 0.72] Another memory chunk
+   Tags: general
+```
+
+Returns `"No matching memories found."` when no results match.
+
+**Safety tier:** ReadOnly (15s timeout)
+
+**Note:** Both memory tools are conditionally registered — they only appear in the tool list when a `MemoryRetrieval` instance is provided to `RegisterBuiltins`. If memory is disabled or the database fails to open, the agent simply doesn't have these tools.
+
 ## Writing a custom tool
 
 To add a new tool, implement the `Tool` interface:

@@ -131,7 +131,7 @@ When the conversation history approaches the context limit (trigger_ratio × max
 
 ### runtime.summarization
 
-Controls rolling summarization behavior.
+Controls rolling summarization behavior. When the context budget is exceeded, the runtime calls the LLM to generate a summary of older messages, stores it in the database, and compacts the session.
 
 ```toml
 [runtime.summarization]
@@ -139,28 +139,42 @@ target_ratio = 0.5   # Aim to reduce context to 50% after summarization
 min_turns = 6        # Don't summarize conversations shorter than 6 turns
 ```
 
+**How it works:** When triggered, the runtime builds a summarization prompt with the existing summary (if any) and messages to compact. The LLM generates a rolling summary, which is stored in `session_summaries` with an incrementing epoch. Older messages are replaced with a `[Conversation Summary]` pseudo-message. On session restart, the prior summary is injected as the opening context.
+
 ### memory
 
-Persistent memory backed by a vector database.
+Persistent memory backed by SQLite (pure Go, no CGO via `modernc.org/sqlite`).
 
 ```toml
 [memory]
-enabled = true
-db_path = ".yantra/memory.db"          # SQLite/libSQL database path
-embedding_backend = "openai"           # "openai" or "ollama"
+enabled = true                         # Set false to disable memory entirely
+db_path = ".yantra/memory.db"          # SQLite database path (auto-created)
+embedding_backend = "openai"           # "openai" or "" (empty = openai default)
 
 [memory.embedding]
 model = "text-embedding-3-small"       # OpenAI embedding model
-# ollama_url = "http://localhost:11434" # For ollama backend
-# ollama_model = "nomic-embed-text"    # For ollama backend
+# Supported models:
+#   text-embedding-3-small  (1536 dimensions, default)
+#   text-embedding-3-large  (3072 dimensions)
+#   text-embedding-ada-002  (1536 dimensions)
+# ollama_url = "http://localhost:11434" # For ollama backend (reserved, not yet implemented)
+# ollama_model = "nomic-embed-text"    # For ollama backend (reserved, not yet implemented)
 
 [memory.retrieval]
-top_k = 8              # Number of results to retrieve
+top_k = 8              # Number of results to retrieve per search
 vector_weight = 0.7    # Weight for vector similarity (0-1)
 fts_weight = 0.3       # Weight for full-text search (0-1)
 ```
 
-Memory uses hybrid retrieval — combining vector similarity search (semantic meaning) with full-text search (exact keyword matching). The weights control the balance. Higher vector_weight favors semantic matches; higher fts_weight favors exact matches.
+Memory uses **hybrid retrieval** — combining vector similarity search (semantic meaning) with full-text search (exact keyword matching via SQLite FTS5). Results from both sources are merged using **Reciprocal Rank Fusion** (RRF) with configurable weights. Higher `vector_weight` favors semantic matches; higher `fts_weight` favors exact keyword matches.
+
+**Graceful degradation:** If `OPENAI_API_KEY` is not set, the system falls back to FTS-only search (no vector embeddings). If the database fails to open, the agent continues without memory. Memory tools (`memory_save`, `memory_search`) are only registered when memory is available.
+
+**Storage details:**
+- Embeddings are stored as compact little-endian binary BLOBs (4 bytes per dimension)
+- Conversation events are persisted per-session for history recall
+- Rolling summaries are maintained with an epoch counter for context compaction
+- Session scratchpads provide per-session key-value storage
 
 ### tools
 

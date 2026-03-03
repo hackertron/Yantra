@@ -20,14 +20,14 @@ Think of it as building your own Claude Code / Cursor agent from scratch.
 │           agent turn loop + session          │
 │     stream → think → act → observe → loop   │
 ├──────────────┬──────────────┬───────────────┤
-│   Provider   │    Tools     │    Memory     │
-│   Layer      │   System     │   (Step 5)    │
-│              │              │   (planned)   │
-│  OpenAI      │  read_file   │              │
-│  Anthropic   │  write_file  │              │
-│  Gemini      │  list_files  │              │
-│              │  shell_exec  │              │
-│              │  web_fetch   │              │
+│   Provider   │    Tools     │    Memory      │
+│   Layer      │   System     │   SQLite +     │
+│              │              │   Hybrid Search│
+│  OpenAI      │  read_file   │  store/recall  │
+│  Anthropic   │  write_file  │  vector + FTS  │
+│  Gemini      │  list_files  │  embeddings    │
+│              │  shell_exec  │  summaries     │
+│              │  web_fetch   │  sessions      │
 ├──────────────┴──────────────┴───────────────┤
 │                   Types                      │
 │          interfaces, contracts, config       │
@@ -81,7 +81,7 @@ internal/
     gemini.go         Google Gemini GenerateContent
     reliable.go       Retry wrapper with exponential backoff
   runtime/            Agent turn loop
-    session.go        In-memory conversation buffer
+    session.go        In-memory conversation buffer + compaction
     runtime.go        AgentRuntime, Run(), stream accumulation, tool dispatch
   tool/               Tool system
     schema.go         JSON Schema builder helpers
@@ -92,7 +92,16 @@ internal/
     list_files.go     list_files tool
     shell_exec.go     shell_exec tool
     web_fetch.go      web_fetch tool
+    memory_save.go    memory_save tool
+    memory_search.go  memory_search tool
     builtin.go        RegisterBuiltins() convenience
+  memory/             Persistent memory system
+    sqlite.go         SQLite database wrapper + schema migrations
+    store.go          Memory store (CRUD + hybrid retrieval)
+    retrieval.go      Vector search, FTS search, RRF fusion
+    session_store.go  Session lifecycle management
+    embedding.go      Embedding backend factory
+    embedding_openai.go  OpenAI embedding integration
 ```
 
 ## Configuration
@@ -117,13 +126,15 @@ All providers implement the same `Provider` interface. Swap between them with on
 
 ## Tools
 
-| Tool         | Safety tier    | Timeout | What it does                                |
-|--------------|---------------|---------|---------------------------------------------|
-| `read_file`  | ReadOnly      | 10s     | Read file with line numbers, offset, limit  |
-| `write_file` | SideEffecting | 10s     | Write/append to file, auto-creates dirs     |
-| `list_files` | ReadOnly      | 10s     | List directory, optional recursive          |
-| `shell_exec` | Privileged    | 60s     | Run shell command, capture stdout/stderr    |
-| `web_fetch`  | SideEffecting | 30s     | HTTP GET/POST, return status + body         |
+| Tool            | Safety tier    | Timeout | What it does                                |
+|-----------------|---------------|---------|---------------------------------------------|
+| `read_file`     | ReadOnly      | 10s     | Read file with line numbers, offset, limit  |
+| `write_file`    | SideEffecting | 10s     | Write/append to file, auto-creates dirs     |
+| `list_files`    | ReadOnly      | 10s     | List directory, optional recursive          |
+| `shell_exec`    | Privileged    | 60s     | Run shell command, capture stdout/stderr    |
+| `web_fetch`     | SideEffecting | 30s     | HTTP GET/POST, return status + body         |
+| `memory_save`   | SideEffecting | 15s     | Save knowledge to persistent memory         |
+| `memory_search` | ReadOnly      | 15s     | Search memory with hybrid retrieval         |
 
 ### Security
 
@@ -150,6 +161,25 @@ The runtime is the core agent loop that ties providers and tools together:
 6. When the LLM responds with text only (no tool calls), the loop ends
 
 The turn timeout covers both provider streaming and tool execution as a single budget. Ctrl-C (SIGINT/SIGTERM) propagates cleanly into the runtime via context cancellation.
+
+When the conversation approaches the context limit, the runtime triggers rolling summarization — it compacts older messages into a summary and keeps recent turns, so the agent can maintain context across long sessions.
+
+## Memory
+
+Persistent memory backed by SQLite (pure Go, no CGO via `modernc.org/sqlite`).
+
+**Hybrid retrieval** combines two search strategies:
+- **Vector search** — cosine similarity over OpenAI embeddings (semantic meaning)
+- **Full-text search** — SQLite FTS5 with BM25 ranking (exact keywords)
+- Results are merged using **Reciprocal Rank Fusion** with configurable weights (default 0.7 vector / 0.3 FTS)
+
+**Graceful degradation** — if no `OPENAI_API_KEY` is set, the system falls back to FTS-only search. Memory is optional; the agent works without it.
+
+**What gets persisted:**
+- Memory chunks (knowledge stored by the agent or user)
+- Conversation events (every message in the turn loop)
+- Rolling summaries (context compaction across sessions)
+- Session scratchpad (key-value state per session)
 
 ## Tests
 

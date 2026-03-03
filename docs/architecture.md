@@ -39,7 +39,7 @@ Everything in Yantra exists to make this loop work well:
 - **Security** prevents the LLM from doing damage
 - **Config** makes it all customizable
 - **Runtime** runs the think → act → observe loop
-- **Memory** (planned) lets the agent remember across sessions
+- **Memory** lets the agent remember across sessions
 - **Gateway** (planned) lets you control it remotely
 
 ## Layer 1: Types (`internal/types/`)
@@ -341,7 +341,9 @@ Schema(
 
 This is a small quality-of-life builder. It outputs valid JSON Schema as `json.RawMessage`, which slots directly into `FunctionDecl.Parameters`.
 
-### The five built-in tools
+### The built-in tools
+
+Yantra ships with 7 built-in tools (5 core + 2 memory):
 
 **read_file** (ReadOnly, 10s timeout)
 - Reads a file with 6-digit line numbers: `     1\tpackage main`
@@ -459,9 +461,17 @@ The runtime classifies errors:
 - Max turns reached → `ErrMaxTurns`
 - Tool execution errors → placed in message content (the LLM sees them and can recover)
 
-### Context budget
+### Context budget and summarization
 
-After each tool dispatch, the runtime estimates token usage (chars/4) and logs a warning if the session is approaching the context limit (`TriggerRatio * MaxContextTokens`). Actual summarization is deferred to Step 5 (Memory).
+After each tool dispatch, the runtime estimates token usage (`totalChars / 4`) and checks if the session is approaching the context limit (`TriggerRatio * MaxContextTokens`). When triggered:
+
+1. A `MinTurns` guard (default 6) prevents summarizing too-short conversations
+2. The runtime builds a summarization prompt including the existing summary (if any) and the messages to compact
+3. The LLM generates a rolling summary via a dedicated system prompt
+4. The summary is stored in the `session_summaries` table with an incrementing epoch
+5. `session.CompactWithSummary()` replaces older messages with a `[Conversation Summary]` pseudo-message, keeping the most recent turns
+
+On session startup, if a prior summary exists, it's injected as the first messages so the agent has context from previous runs.
 
 ## How the pieces connect
 
@@ -482,10 +492,109 @@ yantra run "add error handling to server.go"
        └── loop until text-only response or MaxTurns
 ```
 
+## Layer 5: Memory (`internal/memory/`)
+
+Memory gives the agent persistence — it can store knowledge, recall it later, and maintain context across sessions.
+
+### Storage: SQLite (no CGO)
+
+The memory system uses `modernc.org/sqlite`, a pure-Go SQLite implementation. No CGO means the binary cross-compiles trivially. The database opens with **WAL mode** and a 5-second busy timeout for concurrent access safety.
+
+Schema (6 tables):
+
+```
+chunks              — memory fragments with optional embedding BLOBs
+chunks_fts          — FTS5 virtual table (porter stemmer + unicode61)
+sessions            — session lifecycle tracking
+conversation_events — per-session conversation log
+session_summaries   — rolling summary per session (with epoch counter)
+scratchpads         — key-value state per session
+```
+
+### Hybrid retrieval
+
+Memory search combines two strategies and merges them with Reciprocal Rank Fusion (RRF):
+
+```
+Query: "how does authentication work?"
+     │
+     ├── Vector Search (weight: 0.7)
+     │   Compute embedding → cosine similarity against all chunks
+     │   Returns: semantically similar results
+     │
+     ├── FTS Search (weight: 0.3)
+     │   SQLite FTS5 with BM25 ranking
+     │   Returns: keyword-matching results
+     │
+     └── Reciprocal Rank Fusion (k=60)
+         Merge + deduplicate by chunk ID
+         Score: weight / (60 + rank) per source
+         Return top K results
+```
+
+The system fetches `topK * 3` candidates from each source before fusion, ensuring good coverage. Weights are configurable — higher `VectorWeight` favors semantic matches, higher `FTSWeight` favors exact keyword matches.
+
+**Graceful degradation:**
+- No `OPENAI_API_KEY` → FTS-only search (no embeddings)
+- FTS query fails (malformed syntax) → vector-only search
+- No memory DB → agent runs without memory, logs a warning
+
+### Embeddings
+
+Embeddings are computed via the OpenAI API and stored as compact little-endian binary BLOBs (4 bytes per float32 dimension), saving ~75% compared to JSON-encoded arrays.
+
+Supported models:
+
+| Model | Dimensions |
+|-------|-----------|
+| `text-embedding-3-small` (default) | 1536 |
+| `text-embedding-3-large` | 3072 |
+| `text-embedding-ada-002` | 1536 |
+
+The factory returns `nil` (not an error) when the API key is missing, so the system can always boot.
+
+### Conversation persistence
+
+Every message in the turn loop (user, assistant, tool results) is persisted via `StoreConversationEvent()`. Persistence uses the turn context with deadline, ensuring it respects timeouts. Failed persistence is logged as a warning but does not halt execution (fire-and-forget).
+
+### Memory tools
+
+Two tools expose memory to the agent:
+
+- **`memory_save`** (SideEffecting, 15s) — stores knowledge with optional tags
+- **`memory_search`** (ReadOnly, 15s) — hybrid search with ranked results
+
+These are conditionally registered only when a `MemoryRetrieval` instance is available.
+
+### Session store
+
+`SQLiteSessionStore` manages session lifecycle:
+
+| Operation | Details |
+|-----------|---------|
+| Create | Generates `ses_<32 hex chars>` ID |
+| Get | Single session by ID |
+| List | All sessions, ordered by `updated_at DESC`, optionally including archived |
+| Update | Name, message count, timestamps |
+| Archive | Soft-delete (sets `archived = 1`) |
+
+### Key patterns
+
+**Interface-driven design** — the runtime and tools depend on `types.MemoryRetrieval` and `types.SessionStore` interfaces, not concrete types. Compile-time checks enforce this:
+```go
+var _ types.MemoryRetrieval = (*Store)(nil)
+var _ types.SessionStore = (*SQLiteSessionStore)(nil)
+```
+
+**Transaction safety** — multi-table operations (Store, Forget, StoreConversationEvent) use explicit transactions with `defer tx.Rollback()`.
+
+**Binary embedding storage** — float32 slices are serialized as little-endian BLOBs via custom `encodeFloat32s`/`decodeFloat32s` helpers.
+
 ## What's next
 
 | Step | What | Purpose |
 |------|------|---------|
-| 5 | Memory | Persistent vector DB for cross-session recall + rolling summarization |
 | 6 | Gateway | WebSocket server for remote control |
-| 7 | Multi-agent | Specialist subagents with delegation |
+| 7 | MCP | Model Context Protocol client for external tools |
+| 8 | TUI | Terminal UI with Bubble Tea |
+| 9 | Polish | Config scaffolding, cross-platform build, docs |
