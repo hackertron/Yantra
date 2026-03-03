@@ -3,8 +3,10 @@ package memory
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/hackertron/Yantra/internal/types"
@@ -33,7 +35,10 @@ func NewStore(db *DB, embedder types.EmbeddingBackend, cfg types.RetrievalConfig
 
 // Store saves a chunk to persistent memory.
 func (s *Store) Store(ctx context.Context, req types.MemoryStoreRequest) (string, error) {
-	id := generateID()
+	id, err := generateID()
+	if err != nil {
+		return "", &types.MemoryError{Op: "store", Message: "generate id", Err: err}
+	}
 
 	var embedding []byte
 	if s.embedder != nil {
@@ -164,7 +169,10 @@ func (s *Store) GetSummary(ctx context.Context, sessionID string) (*types.Sessio
 		`SELECT summary, epoch FROM session_summaries WHERE session_id = ?`, sessionID).
 		Scan(&summary, &epoch)
 	if err != nil {
-		return nil, nil // no summary yet
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, &types.MemoryError{Op: "get_summary", Message: "query", Err: err}
 	}
 	return &types.SessionSummary{Summary: summary, Epoch: epoch}, nil
 }
@@ -188,11 +196,14 @@ func (s *Store) GetScratchpad(ctx context.Context, sessionID string) (*types.Scr
 		`SELECT data FROM scratchpads WHERE session_id = ?`, sessionID).
 		Scan(&data)
 	if err != nil {
-		return &types.ScratchpadState{Data: make(map[string]string)}, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return &types.ScratchpadState{Data: make(map[string]string)}, nil
+		}
+		return nil, &types.MemoryError{Op: "get_scratchpad", Message: "query", Err: err}
 	}
 	var state types.ScratchpadState
 	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		return &types.ScratchpadState{Data: make(map[string]string)}, nil
+		return nil, &types.MemoryError{Op: "get_scratchpad", Message: "unmarshal", Err: err}
 	}
 	if state.Data == nil {
 		state.Data = make(map[string]string)
@@ -227,7 +238,13 @@ func (s *Store) StoreConversationEvent(ctx context.Context, sessionID string, ms
 		toolCallsJSON = string(b)
 	}
 
-	_, err := s.db.conn.ExecContext(ctx,
+	tx, err := s.db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return &types.MemoryError{Op: "store_event", Message: "begin tx", Err: err}
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO conversation_events (session_id, role, content, tool_calls, tool_call_id, tool_name)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		sessionID, string(msg.Role), msg.Content, toolCallsJSON, msg.ToolCallID, msg.ToolName)
@@ -236,11 +253,14 @@ func (s *Store) StoreConversationEvent(ctx context.Context, sessionID string, ms
 	}
 
 	// Bump session message count.
-	_, err = s.db.conn.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`UPDATE sessions SET message_count = message_count + 1, updated_at = datetime('now') WHERE id = ?`,
 		sessionID)
 	if err != nil {
 		return &types.MemoryError{Op: "store_event", Message: "update session count", Err: err}
+	}
+	if err := tx.Commit(); err != nil {
+		return &types.MemoryError{Op: "store_event", Message: "commit", Err: err}
 	}
 	return nil
 }
@@ -303,10 +323,12 @@ func toChunks(sc []scoredChunk, topK int) []types.MemoryChunk {
 }
 
 // generateID creates a random hex ID.
-func generateID() string {
+func generateID() (string, error) {
 	b := make([]byte, 12)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 var _ types.MemoryRetrieval = (*Store)(nil)

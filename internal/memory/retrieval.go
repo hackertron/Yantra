@@ -66,9 +66,9 @@ func vectorSearch(ctx context.Context, db *DB, queryVec []float32, topN int) ([]
 // ftsSearch performs a full-text search using SQLite FTS5.
 func ftsSearch(ctx context.Context, db *DB, query string, topN int) ([]scoredChunk, error) {
 	rows, err := db.conn.QueryContext(ctx,
-		`SELECT f.id, f.content, c.source, c.tags, rank
-		 FROM chunks_fts f
-		 JOIN chunks c ON c.id = f.id
+		`SELECT chunks_fts.id, chunks_fts.content, c.source, c.tags, bm25(chunks_fts) AS rank
+		 FROM chunks_fts
+		 JOIN chunks c ON c.id = chunks_fts.id
 		 WHERE chunks_fts MATCH ?
 		 ORDER BY rank
 		 LIMIT ?`, query, topN)

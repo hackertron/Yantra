@@ -21,10 +21,13 @@ func NewSessionStore(db *DB) *SQLiteSessionStore {
 }
 
 func (s *SQLiteSessionStore) Create(ctx context.Context, name string) (*types.SessionRecord, error) {
-	id := generateSessionID()
+	id, err := generateSessionID()
+	if err != nil {
+		return nil, &types.MemoryError{Op: "session_create", Message: "generate id", Err: err}
+	}
 	now := time.Now().UTC()
 
-	_, err := s.db.conn.ExecContext(ctx,
+	_, err = s.db.conn.ExecContext(ctx,
 		`INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
 		id, name, now.Format(time.DateTime), now.Format(time.DateTime))
 	if err != nil {
@@ -123,10 +126,12 @@ func (s *SQLiteSessionStore) Archive(ctx context.Context, id string) error {
 	return nil
 }
 
-func generateSessionID() string {
+func generateSessionID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("ses_%s", hex.EncodeToString(b))
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ses_%s", hex.EncodeToString(b)), nil
 }
 
 var _ types.SessionStore = (*SQLiteSessionStore)(nil)

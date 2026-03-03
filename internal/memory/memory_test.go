@@ -294,6 +294,80 @@ func TestStore_ConversationEvents(t *testing.T) {
 	}
 }
 
+func TestStore_GetSummary_PropagatesQueryErrors(t *testing.T) {
+	db := openTestDB(t)
+	store := NewStore(db, nil, types.RetrievalConfig{})
+	ctx := context.Background()
+
+	if _, err := db.Conn().Exec(`DROP TABLE session_summaries`); err != nil {
+		t.Fatalf("DROP TABLE session_summaries failed: %v", err)
+	}
+
+	summary, err := store.GetSummary(ctx, "s1")
+	if err == nil {
+		t.Fatal("expected GetSummary to return query error")
+	}
+	if summary != nil {
+		t.Fatalf("expected nil summary on query error, got %+v", summary)
+	}
+}
+
+func TestStore_GetScratchpad_InvalidJSONReturnsError(t *testing.T) {
+	db := openTestDB(t)
+	store := NewStore(db, nil, types.RetrievalConfig{})
+	ctx := context.Background()
+
+	if _, err := db.Conn().Exec(`INSERT INTO sessions (id, name) VALUES ('s1', 'test')`); err != nil {
+		t.Fatalf("insert session failed: %v", err)
+	}
+	if _, err := db.Conn().Exec(`INSERT INTO scratchpads (session_id, data) VALUES ('s1', '{invalid')`); err != nil {
+		t.Fatalf("insert scratchpad failed: %v", err)
+	}
+
+	state, err := store.GetScratchpad(ctx, "s1")
+	if err == nil {
+		t.Fatal("expected GetScratchpad to return unmarshal error")
+	}
+	if state != nil {
+		t.Fatalf("expected nil state on unmarshal error, got %+v", state)
+	}
+}
+
+func TestStore_StoreConversationEvent_TransactionRollback(t *testing.T) {
+	db := openTestDB(t)
+	store := NewStore(db, nil, types.RetrievalConfig{})
+	ctx := context.Background()
+
+	if _, err := db.Conn().Exec(`INSERT INTO sessions (id, name) VALUES ('s1', 'test')`); err != nil {
+		t.Fatalf("insert session failed: %v", err)
+	}
+	if _, err := db.Conn().Exec(`
+		CREATE TRIGGER fail_session_update
+		BEFORE UPDATE ON sessions
+		BEGIN
+			SELECT RAISE(FAIL, 'forced update failure');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	err := store.StoreConversationEvent(ctx, "s1", types.Message{
+		Role:    types.RoleUser,
+		Content: "hello",
+	})
+	if err == nil {
+		t.Fatal("expected StoreConversationEvent to fail when session update fails")
+	}
+
+	var eventCount int
+	if err := db.Conn().QueryRow(`SELECT COUNT(*) FROM conversation_events WHERE session_id = 's1'`).Scan(&eventCount); err != nil {
+		t.Fatalf("query event count failed: %v", err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("expected rollback to remove inserted event, found %d rows", eventCount)
+	}
+}
+
 func TestSessionStore_CRUD(t *testing.T) {
 	db := openTestDB(t)
 	ss := NewSessionStore(db)

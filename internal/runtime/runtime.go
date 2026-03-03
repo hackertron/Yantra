@@ -110,7 +110,7 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 
 		// Append assistant message.
 		session.Append(resp.Message)
-		r.persistEvent(ctx, resp.Message)
+		r.persistEvent(turnCtx, resp.Message)
 
 		// If no tool calls, we're done.
 		if len(resp.Message.ToolCalls) == 0 {
@@ -124,18 +124,19 @@ func (r *AgentRuntime) Run(ctx context.Context, systemPrompt, userMessage string
 
 		// Dispatch tool calls under the same turn timeout.
 		toolMsgs := r.dispatchTools(turnCtx, resp.Message.ToolCalls, progress)
-		turnCancel()
 		for _, msg := range toolMsgs {
 			session.Append(msg)
-			r.persistEvent(ctx, msg)
+			r.persistEvent(turnCtx, msg)
 		}
 
 		// Check if the parent context was cancelled during tool dispatch.
 		if ctx.Err() != nil {
+			turnCancel()
 			return nil, types.ErrCancelled
 		}
 
-		r.checkContextBudget(ctx, session, progress)
+		r.checkContextBudget(turnCtx, session, progress)
+		turnCancel()
 	}
 
 	return nil, types.ErrMaxTurns
