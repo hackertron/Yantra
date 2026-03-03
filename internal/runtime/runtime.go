@@ -13,15 +13,20 @@ import (
 	"github.com/hackertron/Yantra/internal/types"
 )
 
+// StreamCallback is invoked for each StreamItem during provider streaming.
+// The gateway uses this to forward text_delta frames mid-flight.
+type StreamCallback func(types.StreamItem)
+
 // AgentRuntime ties a provider and tool registry together to execute the
 // think -> act -> observe turn loop.
 type AgentRuntime struct {
-	provider     types.Provider
-	tools        *tool.ToolRegistry
-	config       types.RuntimeConfig
-	workspaceDir string
-	memory       types.MemoryRetrieval
-	sessionID    string
+	provider       types.Provider
+	tools          *tool.ToolRegistry
+	config         types.RuntimeConfig
+	workspaceDir   string
+	memory         types.MemoryRetrieval
+	sessionID      string
+	streamCallback StreamCallback
 }
 
 // RunResult is the output of a successful Run invocation.
@@ -49,6 +54,12 @@ func New(provider types.Provider, tools *tool.ToolRegistry, config types.Runtime
 func (r *AgentRuntime) SetMemory(mem types.MemoryRetrieval, sessionID string) {
 	r.memory = mem
 	r.sessionID = sessionID
+}
+
+// SetStreamCallback installs a callback invoked for each StreamItem during
+// provider streaming. Pass nil to clear.
+func (r *AgentRuntime) SetStreamCallback(cb StreamCallback) {
+	r.streamCallback = cb
 }
 
 // Run executes the agent turn loop. It streams provider responses, dispatches
@@ -193,6 +204,10 @@ func (r *AgentRuntime) collectStream(ctx context.Context, session *Session) (*ty
 			if item.Error != nil {
 				return nil, item.Error
 			}
+		}
+
+		if r.streamCallback != nil {
+			r.streamCallback(item)
 		}
 	}
 

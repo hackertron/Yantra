@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/hackertron/Yantra/internal/gateway"
 	"github.com/hackertron/Yantra/internal/memory"
 	"github.com/hackertron/Yantra/internal/provider"
 	"github.com/hackertron/Yantra/internal/runtime"
@@ -307,7 +308,63 @@ func runTUI(cmd *cobra.Command, args []string) error {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	fmt.Println("Starting Yantra API server...")
-	// TODO: implement API server
-	return fmt.Errorf("not yet implemented")
+	ctx := cmd.Context()
+	logger := slog.Default()
+
+	cfg, err := types.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	p, err := provider.BuildFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("building provider: %w", err)
+	}
+	p = provider.NewReliable(p, provider.DefaultReliableConfig())
+
+	absWorkspace, err := filepath.Abs(".")
+	if err != nil {
+		return fmt.Errorf("resolving workspace: %w", err)
+	}
+
+	// Set up memory if enabled.
+	var mem types.MemoryRetrieval
+	var memDB *memory.DB
+	var sessStore types.SessionStore
+
+	if cfg.Memory.Enabled {
+		dbPath := cfg.Memory.DBPath
+		if dbPath == "" {
+			dbPath = ".yantra/memory.db"
+		}
+		if !filepath.IsAbs(dbPath) {
+			dbPath = filepath.Join(absWorkspace, dbPath)
+		}
+
+		memDB, err = memory.OpenDB(dbPath)
+		if err != nil {
+			slog.Warn("failed to open memory DB, continuing without memory", "error", err)
+		} else {
+			embedder, err := memory.NewEmbeddingBackend(cfg.Memory)
+			if err != nil {
+				slog.Warn("failed to create embedding backend, continuing without embeddings", "error", err)
+			}
+			mem = memory.NewStore(memDB, embedder, cfg.Memory.Retrieval)
+			sessStore = memory.NewSessionStore(memDB)
+		}
+	}
+	if memDB != nil {
+		defer memDB.Close()
+	}
+
+	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
+	reg := tool.NewRegistry(policy)
+	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {
+		return fmt.Errorf("registering tools: %w", err)
+	}
+
+	srv := gateway.NewServer(cfg.Gateway, cfg, p, reg, mem, sessStore, absWorkspace, logger)
+
+	logger.Info("starting Yantra API server", "listen", cfg.Gateway.Listen)
+	return srv.ListenAndServe(ctx)
 }
