@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.26.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/knadh/koanf/parsers/toml v0.1.0
 	github.com/knadh/koanf/providers/env v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
@@ -28,7 +29,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

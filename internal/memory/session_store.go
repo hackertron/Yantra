@@ -3,7 +3,9 @@ package memory
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -51,7 +53,10 @@ func (s *SQLiteSessionStore) Get(ctx context.Context, id string) (*types.Session
 		`SELECT name, created_at, updated_at, message_count, archived FROM sessions WHERE id = ?`, id).
 		Scan(&name, &createdAt, &updatedAt, &msgCount, &archived)
 	if err != nil {
-		return nil, &types.MemoryError{Op: "session_get", Message: "not found", Err: err}
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, types.ErrSessionNotFound
+		}
+		return nil, &types.MemoryError{Op: "session_get", Message: "query failed", Err: err}
 	}
 
 	rec := &types.SessionRecord{

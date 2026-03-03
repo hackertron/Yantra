@@ -4,10 +4,11 @@ import "errors"
 
 // Sentinel errors for the runtime.
 var (
-	ErrCancelled      = errors.New("turn cancelled")
-	ErrBudgetExceeded = errors.New("budget exceeded")
-	ErrMaxTurns       = errors.New("max turns reached")
-	ErrTimeout        = errors.New("turn timed out")
+	ErrCancelled        = errors.New("turn cancelled")
+	ErrBudgetExceeded   = errors.New("budget exceeded")
+	ErrMaxTurns         = errors.New("max turns reached")
+	ErrTimeout          = errors.New("turn timed out")
+	ErrSessionNotFound  = errors.New("session not found")
 )
 
 // ProviderError represents an error from an LLM provider.
