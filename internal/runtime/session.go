@@ -63,3 +63,27 @@ func (s *Session) Messages() []types.Message {
 func (s *Session) Len() int {
 	return len(s.messages)
 }
+
+// CompactWithSummary replaces older messages with a summary message, keeping
+// the most recent keepCount messages. This is called when the context budget
+// is exceeded and summarization has produced a summary.
+func (s *Session) CompactWithSummary(summary string, keepCount int) {
+	if keepCount >= len(s.messages) || keepCount < 0 {
+		return
+	}
+
+	tail := make([]types.Message, keepCount)
+	copy(tail, s.messages[len(s.messages)-keepCount:])
+
+	// Replace older messages with summary.
+	s.messages = make([]types.Message, 0, 2+keepCount)
+	s.messages = append(s.messages, types.Message{
+		Role:    types.RoleUser,
+		Content: "[Conversation Summary]\n" + summary,
+	})
+	s.messages = append(s.messages, types.Message{
+		Role:    types.RoleAssistant,
+		Content: "I have the context from the conversation summary. Continuing.",
+	})
+	s.messages = append(s.messages, tail...)
+}

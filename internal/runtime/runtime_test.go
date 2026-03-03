@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,6 +120,85 @@ func (p *blockingProvider) Stream(ctx context.Context, c *types.Context) <-chan 
 	return ch
 }
 
+type scriptedProviderWithContextLimit struct {
+	scriptedProvider
+	maxContext int
+}
+
+func (p *scriptedProviderWithContextLimit) MaxContextTokens() int {
+	return p.maxContext
+}
+
+type recordedEvent struct {
+	role        types.MessageRole
+	hasDeadline bool
+}
+
+type recordingMemory struct {
+	mu                 sync.Mutex
+	events             []recordedEvent
+	getSummaryContexts []bool
+	summaries          map[string]types.SessionSummary
+}
+
+func (m *recordingMemory) Store(ctx context.Context, req types.MemoryStoreRequest) (string, error) {
+	return "", nil
+}
+
+func (m *recordingMemory) Recall(ctx context.Context, query string, topK int) ([]types.MemoryChunk, error) {
+	return nil, nil
+}
+
+func (m *recordingMemory) Forget(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *recordingMemory) HybridQuery(ctx context.Context, req types.HybridQueryRequest) ([]types.MemoryChunk, error) {
+	return nil, nil
+}
+
+func (m *recordingMemory) GetSummary(ctx context.Context, sessionID string) (*types.SessionSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, hasDeadline := ctx.Deadline()
+	m.getSummaryContexts = append(m.getSummaryContexts, hasDeadline)
+	if summary, ok := m.summaries[sessionID]; ok {
+		s := summary
+		return &s, nil
+	}
+	return nil, nil
+}
+
+func (m *recordingMemory) SetSummary(ctx context.Context, sessionID string, summary types.SessionSummary) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.summaries == nil {
+		m.summaries = make(map[string]types.SessionSummary)
+	}
+	m.summaries[sessionID] = summary
+	return nil
+}
+
+func (m *recordingMemory) GetScratchpad(ctx context.Context, sessionID string) (*types.ScratchpadState, error) {
+	return &types.ScratchpadState{Data: map[string]string{}}, nil
+}
+
+func (m *recordingMemory) SetScratchpad(ctx context.Context, sessionID string, state types.ScratchpadState) error {
+	return nil
+}
+
+func (m *recordingMemory) StoreConversationEvent(ctx context.Context, sessionID string, msg types.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, hasDeadline := ctx.Deadline()
+	m.events = append(m.events, recordedEvent{role: msg.Role, hasDeadline: hasDeadline})
+	return nil
+}
+
+func (m *recordingMemory) GetConversationHistory(ctx context.Context, sessionID string, limit int) ([]types.Message, error) {
+	return nil, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mock tool
 // ---------------------------------------------------------------------------
@@ -146,8 +226,8 @@ func (t *mockTool) Execute(ctx context.Context, input json.RawMessage, execCtx t
 	}
 	return "ok", nil
 }
-func (t *mockTool) SafetyTier() SafetyTier   { return t.tier }
-func (t *mockTool) Timeout() time.Duration   { return 30 * time.Second }
+func (t *mockTool) SafetyTier() SafetyTier { return t.tier }
+func (t *mockTool) Timeout() time.Duration { return 30 * time.Second }
 
 type SafetyTier = types.SafetyTier
 
@@ -536,6 +616,75 @@ func TestRun_ProgressEvents(t *testing.T) {
 	}
 	if toolExecs < 1 {
 		t.Errorf("expected at least 1 ProgressToolExecution event, got %d", toolExecs)
+	}
+}
+
+func TestRun_MemoryOperationsUseTurnContext(t *testing.T) {
+	mt := &mockTool{
+		name: "echo",
+		tier: types.ReadOnly,
+		execFunc: func(ctx context.Context, input json.RawMessage) (string, error) {
+			return "ok", nil
+		},
+	}
+
+	prov := &scriptedProviderWithContextLimit{
+		scriptedProvider: scriptedProvider{
+			responses: []*types.Response{
+				toolCallResponse([]types.ToolCall{
+					{ID: "call_1", Function: types.FunctionCall{Name: "echo", Arguments: `{"msg":"hello"}`}},
+				}, 10, 5),
+				textResponse("summary", 5, 5), // used by summarization Complete()
+				textResponse("done", 10, 5),
+			},
+		},
+		maxContext: 16,
+	}
+
+	cfg := defaultRuntimeConfig()
+	cfg.ContextBudget.TriggerRatio = 0.5
+	cfg.Summarization.MinTurns = 1
+	cfg.Summarization.TargetRatio = 0.5
+	cfg.TurnTimeoutSecs = 5
+
+	mem := &recordingMemory{}
+	rt := New(prov, newTestRegistry(mt), cfg, "")
+	rt.SetMemory(mem, "s1")
+
+	result, err := rt.Run(context.Background(), "system", strings.Repeat("x", 100), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.FinalContent != "done" {
+		t.Fatalf("unexpected final content: %q", result.FinalContent)
+	}
+
+	mem.mu.Lock()
+	events := append([]recordedEvent(nil), mem.events...)
+	summaryCtxs := append([]bool(nil), mem.getSummaryContexts...)
+	mem.mu.Unlock()
+
+	if len(events) < 2 {
+		t.Fatalf("expected persisted events, got %d", len(events))
+	}
+	for _, ev := range events {
+		if ev.role != types.RoleUser && !ev.hasDeadline {
+			t.Fatalf("expected persisted %q event to use turn deadline context", ev.role)
+		}
+	}
+
+	if len(summaryCtxs) < 2 {
+		t.Fatalf("expected summary lookups during startup and summarization, got %d", len(summaryCtxs))
+	}
+	hasDeadline := false
+	for _, ok := range summaryCtxs {
+		if ok {
+			hasDeadline = true
+			break
+		}
+	}
+	if !hasDeadline {
+		t.Fatal("expected summarization summary lookup to use turn deadline context")
 	}
 }
 
