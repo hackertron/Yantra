@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -74,6 +75,9 @@ func (sm *SessionManager) GetOrCreate(ctx context.Context, sessionID string) (*M
 	// Look up or create the persistent session record.
 	rec, err := sm.server.sessStore.Get(ctx, sessionID)
 	if err != nil {
+		if !errors.Is(err, types.ErrSessionNotFound) {
+			return nil, fmt.Errorf("looking up session: %w", err)
+		}
 		// Not found — create a new record.
 		rec, err = sm.server.sessStore.Create(ctx, "gateway-session")
 		if err != nil {

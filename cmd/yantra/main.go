@@ -357,6 +357,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 		defer memDB.Close()
 	}
 
+	// Sessions are required for the gateway even when memory is disabled.
+	// Fall back to an in-memory SQLite DB for session tracking only.
+	if sessStore == nil {
+		sessDB, err := memory.OpenDB(":memory:")
+		if err != nil {
+			return fmt.Errorf("opening session DB: %w", err)
+		}
+		defer sessDB.Close()
+		sessStore = memory.NewSessionStore(sessDB)
+	}
+
 	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
 	reg := tool.NewRegistry(policy)
 	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {

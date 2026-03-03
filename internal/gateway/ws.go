@@ -5,17 +5,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/hackertron/Yantra/internal/types"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true }, // permissive for dev
-}
 
 // wsConn wraps a single WebSocket connection.
 type wsConn struct {
@@ -26,8 +21,39 @@ type wsConn struct {
 	writeMu   sync.Mutex // gorilla writes are not concurrent-safe
 }
 
+// newUpgrader creates a WebSocket upgrader with origin checking appropriate
+// to the server's security configuration. When an API key is set, all
+// origins are allowed (the hello frame authenticates). When no API key is
+// set (dev/local mode), only localhost origins are permitted to prevent
+// cross-site WebSocket hijacking of a local gateway.
+func (s *Server) newUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin: func(r *http.Request) bool {
+			// If an API key is required, WS auth via the hello frame
+			// protects the endpoint; allow any origin.
+			if s.cfg.APIKey != "" {
+				return true
+			}
+			// Dev mode: restrict to localhost origins.
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // non-browser clients (curl, wscat)
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			host := u.Hostname()
+			return host == "localhost" || host == "127.0.0.1" || host == "::1"
+		},
+	}
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	up := s.newUpgrader()
+	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("websocket upgrade failed", "error", err)
 		return
