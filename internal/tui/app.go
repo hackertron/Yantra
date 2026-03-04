@@ -63,7 +63,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.ready {
 			a.ready = true
 			// Start WebSocket connection on first window resize.
-			cmds = append(cmds, a.client.Connect(nil))
+			cmds = append(cmds, a.client.Connect())
 		}
 		return a, tea.Batch(cmds...)
 
@@ -82,8 +82,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DisconnectedMsg:
 		a.connected = false
 		if msg.Err != nil {
-			a.connStatus = "disconnected"
+			a.connStatus = "reconnecting"
 			a.chat.AppendError(fmt.Sprintf("Disconnected: %v", msg.Err))
+			// Attempt automatic reconnection.
+			return a, a.client.Reconnect()
 		}
 		return a, nil
 

@@ -17,7 +17,7 @@ type Client struct {
 	apiKey    string
 	conn      *websocket.Conn
 	program   *tea.Program
-	mu        sync.Mutex // gorilla writes are not concurrent-safe
+	mu        sync.Mutex // protects conn and program
 	sessionID string
 	done      chan struct{}
 }
@@ -31,9 +31,17 @@ func NewClient(addr, apiKey string) *Client {
 	}
 }
 
-// Connect dials the WebSocket, sends the hello frame, and starts readLoop.
-func (c *Client) Connect(p *tea.Program) tea.Cmd {
+// AttachProgram wires the Bubble Tea program into the client so that
+// readLoop can forward server frames via p.Send(). Must be called
+// before Connect.
+func (c *Client) AttachProgram(p *tea.Program) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.program = p
+}
+
+// Connect dials the WebSocket, sends the hello frame, and starts readLoop.
+func (c *Client) Connect() tea.Cmd {
 	return func() tea.Msg {
 		url := fmt.Sprintf("ws://%s/ws", c.addr)
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
@@ -54,22 +62,28 @@ func (c *Client) Connect(p *tea.Program) tea.Cmd {
 			return DisconnectedMsg{Err: fmt.Errorf("hello: %w", err)}
 		}
 
-		go c.readLoop()
+		// Pass conn as local var to avoid racing with Close/Reconnect.
+		go c.readLoop(conn)
 		return ConnectedMsg{}
 	}
 }
 
-// readLoop reads frames from the WebSocket and sends them as tea.Msg.
-func (c *Client) readLoop() {
+// readLoop reads frames from the given conn and sends them as tea.Msg.
+// It uses the local conn argument so it never races with Close/Reconnect
+// mutating c.conn.
+func (c *Client) readLoop(conn *websocket.Conn) {
 	defer func() {
 		close(c.done)
 	}()
 
 	for {
-		_, msg, err := c.conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			if c.program != nil {
-				c.program.Send(DisconnectedMsg{Err: err})
+			c.mu.Lock()
+			p := c.program
+			c.mu.Unlock()
+			if p != nil {
+				p.Send(DisconnectedMsg{Err: err})
 			}
 			return
 		}
@@ -80,8 +94,13 @@ func (c *Client) readLoop() {
 		}
 
 		teaMsg := c.frameToMsg(frame)
-		if teaMsg != nil && c.program != nil {
-			c.program.Send(teaMsg)
+		if teaMsg != nil {
+			c.mu.Lock()
+			p := c.program
+			c.mu.Unlock()
+			if p != nil {
+				p.Send(teaMsg)
+			}
 		}
 	}
 }
@@ -90,7 +109,9 @@ func (c *Client) readLoop() {
 func (c *Client) frameToMsg(f types.ServerFrame) tea.Msg {
 	switch f.Type {
 	case types.FrameWelcome:
+		c.mu.Lock()
 		c.sessionID = f.SessionID
+		c.mu.Unlock()
 		return WelcomeMsg{SessionID: f.SessionID, Message: f.Message}
 	case types.FrameTextDelta:
 		return TextDeltaMsg{Text: f.Text}
@@ -103,10 +124,14 @@ func (c *Client) frameToMsg(f types.ServerFrame) tea.Msg {
 	case types.FrameSessionList:
 		return SessionListMsg{Sessions: f.Sessions}
 	case types.FrameSessionCreated:
+		c.mu.Lock()
 		c.sessionID = f.SessionID
+		c.mu.Unlock()
 		return SessionCreatedMsg{SessionID: f.SessionID}
 	case types.FrameSessionSwitched:
+		c.mu.Lock()
 		c.sessionID = f.SessionID
+		c.mu.Unlock()
 		return SessionSwitchedMsg{SessionID: f.SessionID}
 	default:
 		return nil
@@ -115,9 +140,12 @@ func (c *Client) frameToMsg(f types.ServerFrame) tea.Msg {
 
 // SendMessage sends a user message to the current session.
 func (c *Client) SendMessage(content string) error {
+	c.mu.Lock()
+	sid := c.sessionID
+	c.mu.Unlock()
 	return c.writeFrame(types.ClientFrame{
 		Type:      types.FrameSend,
-		SessionID: c.sessionID,
+		SessionID: sid,
 		Content:   content,
 	})
 }
@@ -160,8 +188,11 @@ func (c *Client) Reconnect() tea.Cmd {
 		delay := time.Second
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			if c.program != nil {
-				c.program.Send(ReconnectingMsg{Attempt: attempt})
+			c.mu.Lock()
+			p := c.program
+			c.mu.Unlock()
+			if p != nil {
+				p.Send(ReconnectingMsg{Attempt: attempt})
 			}
 			time.Sleep(delay)
 
@@ -174,6 +205,7 @@ func (c *Client) Reconnect() tea.Cmd {
 
 			c.mu.Lock()
 			c.conn = conn
+			sid := c.sessionID
 			c.done = make(chan struct{})
 			c.mu.Unlock()
 
@@ -181,7 +213,7 @@ func (c *Client) Reconnect() tea.Cmd {
 			hello := types.ClientFrame{
 				Type:      types.FrameHello,
 				APIKey:    c.apiKey,
-				SessionID: c.sessionID,
+				SessionID: sid,
 			}
 			if err := c.writeFrame(hello); err != nil {
 				conn.Close()
@@ -189,8 +221,8 @@ func (c *Client) Reconnect() tea.Cmd {
 				continue
 			}
 
-			go c.readLoop()
-			return ConnectedMsg{SessionID: c.sessionID}
+			go c.readLoop(conn)
+			return ConnectedMsg{SessionID: sid}
 		}
 		return DisconnectedMsg{Err: fmt.Errorf("reconnect failed after %d attempts", maxAttempts)}
 	}

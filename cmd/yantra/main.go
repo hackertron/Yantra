@@ -326,10 +326,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	gwCtx, gwCancel := context.WithCancel(cmd.Context())
 	defer gwCancel()
 
-	addr, errCh, err := startGatewayInProcess(gwCtx, cfg, logger)
+	addr, errCh, gwCleanup, err := startGatewayInProcess(gwCtx, cfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting gateway: %w", err)
 	}
+	defer gwCleanup()
 
 	// Wait for the gateway to be healthy.
 	if err := waitForHealth(addr, 10*time.Second); err != nil {
@@ -341,6 +342,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	app := tui.NewApp(client, providerLabel, version)
 
 	p := tea.NewProgram(app)
+	client.AttachProgram(p)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
@@ -364,20 +366,22 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 // startGatewayInProcess boots the gateway server in a goroutine.
 // It mirrors the setup in runServe but returns immediately.
-func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger *slog.Logger) (string, <-chan error, error) {
+// The returned cleanup function closes any opened databases.
+func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger *slog.Logger) (addr string, errCh <-chan error, cleanup func(), err error) {
 	p, err := provider.BuildFromConfig(cfg)
 	if err != nil {
-		return "", nil, fmt.Errorf("building provider: %w", err)
+		return "", nil, nil, fmt.Errorf("building provider: %w", err)
 	}
 	p = provider.NewReliable(p, provider.DefaultReliableConfig())
 
 	absWorkspace, err := filepath.Abs(".")
 	if err != nil {
-		return "", nil, fmt.Errorf("resolving workspace: %w", err)
+		return "", nil, nil, fmt.Errorf("resolving workspace: %w", err)
 	}
 
 	var mem types.MemoryRetrieval
 	var sessStore types.SessionStore
+	var closers []func() // DB close functions
 
 	if cfg.Memory.Enabled {
 		dbPath := cfg.Memory.DBPath
@@ -388,10 +392,11 @@ func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger 
 			dbPath = filepath.Join(absWorkspace, dbPath)
 		}
 
-		memDB, err := memory.OpenDB(dbPath)
-		if err != nil {
-			logger.Warn("failed to open memory DB, continuing without memory", "error", err)
+		memDB, dbErr := memory.OpenDB(dbPath)
+		if dbErr != nil {
+			logger.Warn("failed to open memory DB, continuing without memory", "error", dbErr)
 		} else {
+			closers = append(closers, func() { memDB.Close() })
 			embedder, embErr := memory.NewEmbeddingBackend(cfg.Memory)
 			if embErr != nil {
 				logger.Warn("failed to create embedding backend", "error", embErr)
@@ -402,41 +407,49 @@ func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger 
 	}
 
 	if sessStore == nil {
-		sessDB, err := memory.OpenDB(":memory:")
-		if err != nil {
-			return "", nil, fmt.Errorf("opening session DB: %w", err)
+		sessDB, dbErr := memory.OpenDB(":memory:")
+		if dbErr != nil {
+			return "", nil, nil, fmt.Errorf("opening session DB: %w", dbErr)
 		}
+		closers = append(closers, func() { sessDB.Close() })
 		sessStore = memory.NewSessionStore(sessDB)
 	}
 
 	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
 	reg := tool.NewRegistry(policy)
 	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {
-		return "", nil, fmt.Errorf("registering tools: %w", err)
+		return "", nil, nil, fmt.Errorf("registering tools: %w", err)
 	}
 
-	addr := cfg.Gateway.Listen
+	addr = cfg.Gateway.Listen
 	if addr == "" {
 		addr = "127.0.0.1:7700"
 	}
 
 	srv := gateway.NewServer(cfg.Gateway, cfg, p, reg, mem, sessStore, absWorkspace, logger)
 
-	errCh := make(chan error, 1)
+	ch := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServe(ctx)
+		ch <- srv.ListenAndServe(ctx)
 	}()
 
-	return addr, errCh, nil
+	cleanupFn := func() {
+		for _, c := range closers {
+			c()
+		}
+	}
+
+	return addr, ch, cleanupFn, nil
 }
 
 // waitForHealth polls the gateway /health endpoint until it responds 200.
 func waitForHealth(addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://%s/health", addr)
+	client := &http.Client{Timeout: time.Second}
 
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
