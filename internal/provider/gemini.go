@@ -70,7 +70,7 @@ func (p *GeminiProvider) Stream(ctx context.Context, c *types.Context) <-chan ty
 				return
 			}
 
-			if text := result.Text(); text != "" {
+			if text := geminiTextParts(result); text != "" {
 				ch <- types.StreamItem{Type: types.StreamText, Text: text}
 			}
 
@@ -119,11 +119,32 @@ func (p *GeminiProvider) buildRequest(c *types.Context) ([]*genai.Content, *gena
 	return contents, config
 }
 
+// geminiTextParts extracts text from candidate parts directly, skipping
+// FunctionCall/FunctionResponse parts. This avoids the SDK's result.Text()
+// which emits a warning string when non-text parts are present.
+func geminiTextParts(result *genai.GenerateContentResponse) string {
+	var texts []string
+	if result.Candidates == nil {
+		return ""
+	}
+	for _, cand := range result.Candidates {
+		if cand.Content == nil {
+			continue
+		}
+		for _, part := range cand.Content.Parts {
+			if part.Text != "" && part.FunctionCall == nil && part.FunctionResponse == nil {
+				texts = append(texts, part.Text)
+			}
+		}
+	}
+	return strings.Join(texts, "")
+}
+
 func geminiResultToResponse(result *genai.GenerateContentResponse) *types.Response {
 	resp := &types.Response{
 		Message: types.Message{
 			Role:    types.RoleAssistant,
-			Content: result.Text(),
+			Content: geminiTextParts(result),
 		},
 	}
 
