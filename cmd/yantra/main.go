@@ -4,16 +4,20 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/hackertron/Yantra/internal/gateway"
 	"github.com/hackertron/Yantra/internal/memory"
 	"github.com/hackertron/Yantra/internal/provider"
 	"github.com/hackertron/Yantra/internal/runtime"
 	"github.com/hackertron/Yantra/internal/tool"
+	"github.com/hackertron/Yantra/internal/tui"
 	"github.com/hackertron/Yantra/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -302,9 +306,160 @@ func runStart(cmd *cobra.Command, args []string) error {
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
-	fmt.Println("Launching Yantra TUI...")
-	// TODO: implement TUI launch
-	return fmt.Errorf("not yet implemented")
+	cfg, err := types.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Redirect slog to a temp file so logs don't corrupt the TUI.
+	logFile, err := os.CreateTemp("", "yantra-tui-*.log")
+	if err != nil {
+		return fmt.Errorf("creating log file: %w", err)
+	}
+	defer logFile.Close()
+	logger := slog.New(slog.NewTextHandler(logFile, nil))
+
+	// Build the provider label for the header.
+	providerLabel := fmt.Sprintf("%s/%s", cfg.Selection.Provider, cfg.Selection.Model)
+
+	// Start the gateway server in-process.
+	gwCtx, gwCancel := context.WithCancel(cmd.Context())
+	defer gwCancel()
+
+	addr, errCh, gwCleanup, err := startGatewayInProcess(gwCtx, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("starting gateway: %w", err)
+	}
+	defer gwCleanup()
+
+	// Wait for the gateway to be healthy.
+	if err := waitForHealth(addr, 10*time.Second); err != nil {
+		return fmt.Errorf("gateway not ready: %w (check logs: %s)", err, logFile.Name())
+	}
+
+	// Create the TUI client and app.
+	client := tui.NewClient(addr, cfg.Gateway.APIKey)
+	hasDark := tui.DetectDarkMode()
+	app := tui.NewApp(client, providerLabel, version, hasDark)
+
+	p := tea.NewProgram(app)
+	client.AttachProgram(p)
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("TUI error: %w", err)
+	}
+
+	// Clean up.
+	client.Close()
+	gwCancel()
+
+	// Drain any gateway error.
+	select {
+	case gwErr := <-errCh:
+		if gwErr != nil {
+			logger.Warn("gateway exited with error", "error", gwErr)
+		}
+	default:
+	}
+
+	fmt.Fprintf(os.Stderr, "Logs written to: %s\n", logFile.Name())
+	return nil
+}
+
+// startGatewayInProcess boots the gateway server in a goroutine.
+// It mirrors the setup in runServe but returns immediately.
+// The returned cleanup function closes any opened databases.
+func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger *slog.Logger) (addr string, errCh <-chan error, cleanup func(), err error) {
+	p, err := provider.BuildFromConfig(cfg)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("building provider: %w", err)
+	}
+	p = provider.NewReliable(p, provider.DefaultReliableConfig())
+
+	absWorkspace, err := filepath.Abs(".")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("resolving workspace: %w", err)
+	}
+
+	var mem types.MemoryRetrieval
+	var sessStore types.SessionStore
+	var closers []func() // DB close functions
+
+	if cfg.Memory.Enabled {
+		dbPath := cfg.Memory.DBPath
+		if dbPath == "" {
+			dbPath = ".yantra/memory.db"
+		}
+		if !filepath.IsAbs(dbPath) {
+			dbPath = filepath.Join(absWorkspace, dbPath)
+		}
+
+		memDB, dbErr := memory.OpenDB(dbPath)
+		if dbErr != nil {
+			logger.Warn("failed to open memory DB, continuing without memory", "error", dbErr)
+		} else {
+			closers = append(closers, func() { memDB.Close() })
+			embedder, embErr := memory.NewEmbeddingBackend(cfg.Memory)
+			if embErr != nil {
+				logger.Warn("failed to create embedding backend", "error", embErr)
+			}
+			mem = memory.NewStore(memDB, embedder, cfg.Memory.Retrieval)
+			sessStore = memory.NewSessionStore(memDB)
+		}
+	}
+
+	if sessStore == nil {
+		sessDB, dbErr := memory.OpenDB(":memory:")
+		if dbErr != nil {
+			return "", nil, nil, fmt.Errorf("opening session DB: %w", dbErr)
+		}
+		closers = append(closers, func() { sessDB.Close() })
+		sessStore = memory.NewSessionStore(sessDB)
+	}
+
+	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
+	reg := tool.NewRegistry(policy)
+	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {
+		return "", nil, nil, fmt.Errorf("registering tools: %w", err)
+	}
+
+	addr = cfg.Gateway.Listen
+	if addr == "" {
+		addr = "127.0.0.1:7700"
+	}
+
+	srv := gateway.NewServer(cfg.Gateway, cfg, p, reg, mem, sessStore, absWorkspace, logger)
+
+	ch := make(chan error, 1)
+	go func() {
+		ch <- srv.ListenAndServe(ctx)
+	}()
+
+	cleanupFn := func() {
+		for _, c := range closers {
+			c()
+		}
+	}
+
+	return addr, ch, cleanupFn, nil
+}
+
+// waitForHealth polls the gateway /health endpoint until it responds 200.
+func waitForHealth(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	url := fmt.Sprintf("http://%s/health", addr)
+	client := &http.Client{Timeout: time.Second}
+
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for gateway at %s", addr)
 }
 
 func runServe(cmd *cobra.Command, args []string) error {

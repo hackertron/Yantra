@@ -255,9 +255,10 @@ func jsonSchemaToGeminiSchema(raw json.RawMessage) *genai.Schema {
 
 func jsonPropToGeminiSchema(raw json.RawMessage) *genai.Schema {
 	var prop struct {
-		Type        string   `json:"type"`
-		Description string   `json:"description"`
-		Enum        []string `json:"enum,omitempty"`
+		Type        string           `json:"type"`
+		Description string           `json:"description"`
+		Enum        []string         `json:"enum,omitempty"`
+		Items       *json.RawMessage `json:"items,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &prop); err != nil {
 		return &genai.Schema{Type: genai.TypeString}
@@ -275,6 +276,11 @@ func jsonPropToGeminiSchema(raw json.RawMessage) *genai.Schema {
 		gs.Type = genai.TypeBoolean
 	case "array":
 		gs.Type = genai.TypeArray
+		if prop.Items != nil {
+			gs.Items = jsonPropToGeminiSchema(*prop.Items)
+		} else {
+			gs.Items = &genai.Schema{Type: genai.TypeString}
+		}
 	default:
 		gs.Type = genai.TypeString
 	}
