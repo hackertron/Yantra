@@ -221,6 +221,11 @@ func runAgent(ctx context.Context, prompt, systemPrompt, workspace string) error
 		return fmt.Errorf("resolving workspace: %w", err)
 	}
 
+	// Set up output scrubbing to hide host paths from the LLM.
+	reg.SetScrubber(tool.NewScrubber([]tool.PathMapping{
+		{HostPath: absWorkspace, DisplayPath: "."},
+	}))
+
 	// Set up memory if enabled.
 	var mem types.MemoryRetrieval
 	var memDB *memory.DB
@@ -418,6 +423,9 @@ func startGatewayInProcess(ctx context.Context, cfg *types.YantraConfig, logger 
 
 	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
 	reg := tool.NewRegistry(policy)
+	reg.SetScrubber(tool.NewScrubber([]tool.PathMapping{
+		{HostPath: absWorkspace, DisplayPath: "."},
+	}))
 	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {
 		return "", nil, nil, fmt.Errorf("registering tools: %w", err)
 	}
@@ -525,6 +533,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	policy := tool.NewWorkspacePolicy(cfg.Tools.Shell)
 	reg := tool.NewRegistry(policy)
+	reg.SetScrubber(tool.NewScrubber([]tool.PathMapping{
+		{HostPath: absWorkspace, DisplayPath: "."},
+	}))
 	if err := tool.RegisterBuiltins(reg, cfg.Tools, mem); err != nil {
 		return fmt.Errorf("registering tools: %w", err)
 	}

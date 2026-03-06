@@ -95,9 +95,10 @@ type ToolsConfig struct {
 
 // WebSearchConfig controls the web_search tool.
 type WebSearchConfig struct {
-	Provider  string `json:"provider" koanf:"provider"`     // "duckduckgo", "google", "searxng"
-	BaseURL   string `json:"base_url,omitempty" koanf:"base_url"`
-	APIKeyEnv string `json:"api_key_env,omitempty" koanf:"api_key_env"`
+	Provider   string `json:"provider" koanf:"provider"`        // "duckduckgo", "google", "searxng"
+	BaseURL    string `json:"base_url,omitempty" koanf:"base_url"`
+	APIKeyEnv  string `json:"api_key_env,omitempty" koanf:"api_key_env"`
+	GoogleCXEnv string `json:"google_cx_env,omitempty" koanf:"google_cx_env"` // Google Custom Search engine ID env var
 }
 
 // ShellConfig controls the shell_exec tool.

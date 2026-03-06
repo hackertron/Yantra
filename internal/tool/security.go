@@ -86,7 +86,7 @@ func (p *WorkspacePolicy) CheckExecution(t types.Tool, input json.RawMessage, ex
 	name := t.Name()
 
 	switch name {
-	case "read_file", "write_file", "list_files":
+	case "read_file", "write_file", "file_edit", "list_files":
 		return p.checkFilePath(input, execCtx.WorkspaceDir)
 	case "shell_exec":
 		return p.checkShellCommand(input)

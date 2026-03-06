@@ -16,6 +16,7 @@ const defaultMaxOutputBytes = 128 * 1024 // 128 KB
 type ToolRegistry struct {
 	tools          map[string]types.Tool
 	policy         SecurityPolicy
+	scrubber       *Scrubber
 	maxOutputBytes int
 }
 
@@ -26,6 +27,11 @@ func NewRegistry(policy SecurityPolicy) *ToolRegistry {
 		policy:         policy,
 		maxOutputBytes: defaultMaxOutputBytes,
 	}
+}
+
+// SetScrubber configures output scrubbing for all tool results.
+func (r *ToolRegistry) SetScrubber(s *Scrubber) {
+	r.scrubber = s
 }
 
 // SetMaxOutputBytes overrides the default output truncation limit.
@@ -130,6 +136,11 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 
 	// Truncate output at line boundary if too large.
 	output = truncateOutput(output, r.maxOutputBytes)
+
+	// Scrub sensitive data (host paths, credential keywords, high-entropy tokens).
+	if r.scrubber != nil {
+		output = r.scrubber.Scrub(output)
+	}
 
 	return output, nil
 }

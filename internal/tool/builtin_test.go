@@ -253,7 +253,7 @@ func TestRegisterBuiltins(t *testing.T) {
 		t.Fatalf("RegisterBuiltins failed: %v", err)
 	}
 
-	expected := []string{"list_files", "read_file", "shell_exec", "web_fetch", "write_file"}
+	expected := []string{"file_edit", "list_files", "read_file", "shell_exec", "web_fetch", "web_search", "write_file"}
 	got := r.List()
 	if len(got) != len(expected) {
 		t.Fatalf("expected %d tools, got %d: %v", len(expected), len(got), got)

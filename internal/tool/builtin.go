@@ -8,9 +8,11 @@ func RegisterBuiltins(r *ToolRegistry, cfg types.ToolsConfig, mem types.MemoryRe
 	tools := []types.Tool{
 		NewReadFile(),
 		NewWriteFile(),
+		NewEditFile(),
 		NewListFiles(),
 		NewShellExec(),
 		NewWebFetch(),
+		NewWebSearch(cfg.WebSearch),
 	}
 	if mem != nil {
 		tools = append(tools, NewMemorySearch(mem), NewMemorySave(mem))
