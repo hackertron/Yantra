@@ -31,8 +31,8 @@ type App struct {
 }
 
 // NewApp creates the root TUI application model.
-func NewApp(client *Client, providerLabel, version string) App {
-	styles := NewStyles()
+func NewApp(client *Client, providerLabel, version string, hasDark bool) App {
+	styles := NewStyles(hasDark)
 	return App{
 		chat:       NewChatModel(styles),
 		input:      NewInputModel(styles),

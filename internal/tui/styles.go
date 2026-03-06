@@ -48,9 +48,14 @@ type Styles struct {
 	Accent   lipgloss.Style
 }
 
-// NewStyles creates a Styles set that adapts to the terminal background.
-func NewStyles() Styles {
-	hasDark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+// DetectDarkMode queries the terminal for background color.
+// Must be called before tea.Program takes over stdin.
+func DetectDarkMode() bool {
+	return lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+}
+
+// NewStyles creates a Styles set adapted to the given background.
+func NewStyles(hasDark bool) Styles {
 	ld := lipgloss.LightDark(hasDark)
 
 	accent := lipgloss.Color("#AB9DF2") // soft purple

@@ -339,7 +339,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create the TUI client and app.
 	client := tui.NewClient(addr, cfg.Gateway.APIKey)
-	app := tui.NewApp(client, providerLabel, version)
+	hasDark := tui.DetectDarkMode()
+	app := tui.NewApp(client, providerLabel, version, hasDark)
 
 	p := tea.NewProgram(app)
 	client.AttachProgram(p)
