@@ -62,7 +62,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if !a.ready {
 			a.ready = true
-			// Start WebSocket connection on first window resize.
 			cmds = append(cmds, a.client.Connect())
 		}
 		return a, tea.Batch(cmds...)
@@ -84,7 +83,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			a.connStatus = "reconnecting"
 			a.chat.AppendError(fmt.Sprintf("Disconnected: %v", msg.Err))
-			// Attempt automatic reconnection.
 			return a, a.client.Reconnect()
 		}
 		return a, nil
@@ -126,7 +124,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.chat.AppendError(msg.Error)
 		if a.turning {
 			a.chat.FinishAllTools()
-			// If there's a streaming message, finish it.
 			a.chat.FinishStreaming("")
 			a.turning = false
 		}
@@ -139,7 +136,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SessionCreatedMsg:
 		a.sessionID = msg.SessionID
 		a.chat.Clear()
-		a.chat.AppendSystem(fmt.Sprintf("Created new session: %s", truncateID(msg.SessionID)))
+		a.chat.AppendSystem(fmt.Sprintf("New session: %s", truncateID(msg.SessionID)))
 		return a, nil
 
 	case SessionSwitchedMsg:
@@ -175,17 +172,10 @@ func (a App) View() tea.View {
 		return tea.NewView("  Initializing...")
 	}
 
-	// Header bar
 	header := a.renderHeader()
-
-	// Status bar
-	status := a.renderStatusBar()
-
-	// Chat viewport fills remaining space
 	chatView := a.chat.View()
-
-	// Input area
 	inputView := a.input.View()
+	status := a.renderStatusBar()
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		header,
@@ -196,7 +186,6 @@ func (a App) View() tea.View {
 
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -207,15 +196,13 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "ctrl+c":
 		if a.turning {
-			// First Ctrl+C cancels the current turn.
 			a.client.SendCancel()
 			a.turning = false
 			a.chat.FinishAllTools()
 			a.chat.FinishStreaming("")
-			a.chat.AppendSystem("Turn cancelled.")
+			a.chat.AppendSystem("Cancelled.")
 			return a, nil
 		}
-		// Second Ctrl+C quits.
 		return a, tea.Quit
 
 	case "esc":
@@ -224,24 +211,22 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.turning = false
 			a.chat.FinishAllTools()
 			a.chat.FinishStreaming("")
-			a.chat.AppendSystem("Turn cancelled.")
+			a.chat.AppendSystem("Cancelled.")
 			return a, nil
 		}
 		return a, nil
 
 	case "enter":
 		if a.turning {
-			return a, nil // ignore while turn is active
+			return a, nil
 		}
 		return a.handleSend()
 
 	case "alt+enter":
-		// Insert newline — forward to textarea.
 		cmd := a.input.Update(msg)
 		return a, cmd
 	}
 
-	// Forward all other keys to the input textarea.
 	cmd := a.input.Update(msg)
 	return a, cmd
 }
@@ -255,12 +240,10 @@ func (a App) handleSend() (tea.Model, tea.Cmd) {
 
 	a.input.Reset()
 
-	// Check for slash command.
 	if cmd := ParseSlashCommand(text); cmd != nil {
 		return a.dispatchSlashCommand(cmd)
 	}
 
-	// Regular message — send to gateway.
 	a.chat.AppendUserMessage(text)
 	a.turning = true
 	a.chat.StartStreaming()
@@ -307,57 +290,57 @@ func (a App) dispatchSlashCommand(cmd *SlashCommand) (tea.Model, tea.Cmd) {
 			a.turning = false
 			a.chat.FinishAllTools()
 			a.chat.FinishStreaming("")
-			a.chat.AppendSystem("Turn cancelled.")
+			a.chat.AppendSystem("Cancelled.")
 		} else {
 			a.chat.AppendSystem("No active turn to cancel.")
 		}
 	default:
-		a.chat.AppendError(fmt.Sprintf("Unknown command: /%s (type /help for commands)", cmd.Name))
+		a.chat.AppendError(fmt.Sprintf("Unknown command: /%s — type /help", cmd.Name))
 	}
 	return a, nil
 }
 
 // renderHeader builds the top header bar.
 func (a App) renderHeader() string {
-	// Connection indicator
+	title := a.styles.HeaderTitle.Render("yantra")
+
 	var connDot string
 	switch a.connStatus {
 	case "connected":
-		connDot = a.styles.ConnGreen.Render("\u25cf") // ●
+		connDot = a.styles.ConnGreen.Render("●")
 	case "disconnected":
-		connDot = a.styles.ConnRed.Render("\u25cf")
+		connDot = a.styles.ConnRed.Render("●")
 	default:
-		connDot = a.styles.ConnYellow.Render("\u25cf")
+		connDot = a.styles.ConnYellow.Render("●")
 	}
 
-	provider := a.provider
-	if provider == "" {
-		provider = "connecting..."
-	}
+	provider := a.styles.HeaderDim.Render(a.provider)
+	conn := a.styles.HeaderDim.Render(a.connStatus)
 
-	title := fmt.Sprintf(" Yantra %s \u2502 %s \u2502 %s %s ",
-		a.version, provider, connDot, a.connStatus)
-
-	return a.styles.Header.Width(a.width).Render(title)
+	header := fmt.Sprintf("%s  %s  %s %s", title, provider, connDot, conn)
+	return a.styles.HeaderBar.Width(a.width).Render(header)
 }
 
 // renderStatusBar builds the bottom status bar.
 func (a App) renderStatusBar() string {
-	sid := truncateID(a.sessionID)
-	if sid == "" {
-		sid = "no session"
-	}
-
 	var parts []string
-	parts = append(parts, sid)
+
+	sid := truncateID(a.sessionID)
+	if sid != "" {
+		parts = append(parts, a.styles.StatusAccent.Render(sid))
+	}
 	if a.tokenStatus != "" {
 		parts = append(parts, a.tokenStatus)
 	}
 	if a.turning {
-		parts = append(parts, "thinking...")
+		parts = append(parts, a.styles.Accent.Render("thinking..."))
 	}
 
-	content := " " + strings.Join(parts, " \u2502 ")
+	if len(parts) == 0 {
+		return ""
+	}
+
+	content := strings.Join(parts, a.styles.Dimmed.Render(" │ "))
 	return a.styles.StatusBar.Width(a.width).Render(content)
 }
 
@@ -373,7 +356,7 @@ func (a *App) renderSessionList(sessions []types.SessionRecord) {
 	for _, s := range sessions {
 		marker := "  "
 		if s.ID == a.sessionID {
-			marker = "> "
+			marker = "▸ "
 		}
 		name := s.Name
 		if name == "" {
@@ -392,7 +375,7 @@ func (a *App) renderSessionList(sessions []types.SessionRecord) {
 
 // recalcLayout distributes vertical space between components.
 func (a *App) recalcLayout() {
-	headerHeight := 1
+	headerHeight := 2 // title + border
 	statusHeight := 1
 	inputHeight := a.input.Height()
 

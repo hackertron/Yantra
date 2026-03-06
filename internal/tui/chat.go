@@ -37,7 +37,6 @@ func NewChatModel(styles Styles) ChatModel {
 	)
 
 	vp := viewport.New()
-	vp.MouseWheelEnabled = true
 	vp.SoftWrap = true
 
 	return ChatModel{
@@ -55,7 +54,7 @@ func (c *ChatModel) SetSize(width, height int) {
 	c.height = height
 	c.viewport.SetWidth(width)
 	c.viewport.SetHeight(height)
-	c.md.SetWidth(width - 4)
+	c.md.SetWidth(width - 6) // indent width
 	c.rerender()
 }
 
@@ -100,18 +99,18 @@ func (c *ChatModel) FinishStreaming(fullText string) {
 		if fullText != "" {
 			last.Content = fullText
 		}
-		last.Rendered = c.md.Render(last.Content)
+		if last.Content != "" {
+			last.Rendered = c.md.Render(last.Content)
+		}
 		c.rerender()
 	}
 }
 
 // ShowToolProgress adds or updates a tool progress line.
 func (c *ChatModel) ShowToolProgress(tool, status string) {
-	// Check if there's already a tool line for this tool.
 	for i := len(c.messages) - 1; i >= 0; i-- {
 		if c.messages[i].Role == "tool" && c.messages[i].ToolName == tool {
 			c.messages[i].Content = status
-			// Mark streaming=false when done (status contains "complete" or "done").
 			if strings.Contains(strings.ToLower(status), "complete") ||
 				strings.Contains(strings.ToLower(status), "done") ||
 				strings.Contains(strings.ToLower(status), "result") {
@@ -120,7 +119,6 @@ func (c *ChatModel) ShowToolProgress(tool, status string) {
 			c.rerender()
 			return
 		}
-		// Stop searching once we hit a non-tool message.
 		if c.messages[i].Role != "tool" && c.messages[i].Role != "assistant" {
 			break
 		}
@@ -171,13 +169,11 @@ func (c *ChatModel) Update(msg tea.Msg) tea.Cmd {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		// Re-render to update spinner frames.
 		if c.hasActiveSpinner() {
 			c.rerender()
 		}
 	}
 
-	// Track if user has scrolled up.
 	prevPercent := c.viewport.ScrollPercent()
 	var cmd tea.Cmd
 	c.viewport, cmd = c.viewport.Update(msg)
@@ -185,7 +181,6 @@ func (c *ChatModel) Update(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 
-	// Re-enable auto-scroll when user scrolls back to bottom.
 	newPercent := c.viewport.ScrollPercent()
 	if prevPercent < 1.0 && newPercent >= 1.0 {
 		c.autoScroll = true
@@ -216,56 +211,87 @@ func (c *ChatModel) hasActiveSpinner() bool {
 	return false
 }
 
+// indent prefixes every line of text with the given prefix.
+func indent(text, prefix string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
 // rerender rebuilds the viewport content from all messages.
 func (c *ChatModel) rerender() {
 	var b strings.Builder
+	pad := "    " // 4-space indent for message body
 
-	for _, msg := range c.messages {
+	for i, msg := range c.messages {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+
 		switch msg.Role {
 		case "user":
-			label := c.styles.UserLabel.Render("You")
-			b.WriteString(label + "\n")
-			b.WriteString(c.styles.UserMessage.Render(msg.Content))
-			b.WriteString("\n\n")
+			indicator := c.styles.UserIndicator.Render()
+			b.WriteString(fmt.Sprintf("  %s %s\n", indicator, c.styles.UserMessage.Render(msg.Content)))
 
 		case "assistant":
-			label := c.styles.AssistantLabel.Render("Yantra")
-			b.WriteString(label + "\n")
+			indicator := c.styles.AssistantIndicator.Render()
+			b.WriteString(fmt.Sprintf("  %s ", indicator))
 			if msg.Streaming {
-				b.WriteString(msg.Content)
-				b.WriteString(c.styles.AssistantLabel.Render("\u258c")) // ▌ cursor
-				b.WriteString("\n\n")
+				if msg.Content == "" {
+					b.WriteString(c.styles.Dimmed.Render("thinking..."))
+				} else {
+					// First line inline with indicator, rest indented
+					lines := strings.Split(msg.Content, "\n")
+					b.WriteString(lines[0])
+					if len(lines) > 1 {
+						b.WriteString("\n")
+						b.WriteString(indent(strings.Join(lines[1:], "\n"), pad))
+					}
+					b.WriteString(c.styles.Accent.Render("▍"))
+				}
+				b.WriteString("\n")
 			} else if msg.Rendered != "" {
-				b.WriteString(msg.Rendered)
-				b.WriteString("\n\n")
+				lines := strings.Split(msg.Rendered, "\n")
+				b.WriteString(lines[0])
+				if len(lines) > 1 {
+					b.WriteString("\n")
+					b.WriteString(indent(strings.Join(lines[1:], "\n"), pad))
+				}
+				b.WriteString("\n")
+			} else if msg.Content != "" {
+				lines := strings.Split(msg.Content, "\n")
+				b.WriteString(lines[0])
+				if len(lines) > 1 {
+					b.WriteString("\n")
+					b.WriteString(indent(strings.Join(lines[1:], "\n"), pad))
+				}
+				b.WriteString("\n")
 			} else {
-				b.WriteString(msg.Content)
-				b.WriteString("\n\n")
+				b.WriteString("\n")
 			}
 
 		case "tool":
+			var icon string
 			if msg.Streaming {
-				frame := c.spinner.View()
-				line := fmt.Sprintf("%s %s: %s",
-					c.styles.ToolLine.Render(frame),
-					c.styles.ToolLine.Render(msg.ToolName),
-					c.styles.Dimmed.Render(msg.Content),
-				)
-				b.WriteString(line + "\n")
+				icon = c.spinner.View()
 			} else {
-				line := fmt.Sprintf("%s %s: %s",
-					c.styles.ToolLine.Render("\u2713"), // ✓
-					c.styles.ToolLine.Render(msg.ToolName),
-					c.styles.Dimmed.Render(msg.Content),
-				)
-				b.WriteString(line + "\n")
+				icon = c.styles.ToolDone.Render("✓")
 			}
+			name := c.styles.ToolName.Render(msg.ToolName)
+			status := c.styles.ToolStatus.Render(msg.Content)
+			b.WriteString(fmt.Sprintf("    %s %s %s\n", icon, name, status))
 
 		case "error":
-			b.WriteString(c.styles.ErrorText.Render("Error: "+msg.Content) + "\n\n")
+			label := c.styles.ErrorLabel.Render("  ✗ error:")
+			b.WriteString(fmt.Sprintf("%s %s\n", label, c.styles.ErrorText.Render(msg.Content)))
 
 		case "system":
-			b.WriteString(c.styles.Dimmed.Render(msg.Content) + "\n\n")
+			lines := strings.Split(msg.Content, "\n")
+			for _, line := range lines {
+				b.WriteString(fmt.Sprintf("    %s\n", c.styles.Dimmed.Render(line)))
+			}
 		}
 	}
 
@@ -288,4 +314,3 @@ func (c *ChatModel) FinishAllTools() {
 		}
 	}
 }
-
